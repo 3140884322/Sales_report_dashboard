@@ -1142,7 +1142,7 @@ def detect_anomalies(orders, monthly_summary):
                 }
             )
 
-        if row["return_rate"] > 0.15:
+        if pd.notna(row["return_rate"]) and row["return_rate"] > 0.15:
             anomaly_rows.append(
                 {
                     "anomaly_type": "return_rate_over_15_percent",
@@ -1975,10 +1975,13 @@ def run_pipeline(
     excel_path=DEFAULT_EXCEL_OUTPUT,
     summary_path=DEFAULT_SUMMARY_OUTPUT,
     config_path=None,
+    report_tables_transform=None,
 ):
     """Run the full sales reporting workflow."""
     column_mapping = load_column_mapping(config_path)
     report_tables = build_sales_report(csv_path, expenses_path, column_mapping)
+    if report_tables_transform is not None:
+        report_tables = report_tables_transform(report_tables)
     excel_output = export_excel(report_tables, excel_path)
     summary_output = generate_summary_markdown(report_tables, summary_path)
 

@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pandas as pd
+
+
+@dataclass(frozen=True)
+class JoinSafetyAssessment:
+    match_rate: float
+    distinct_overlap_rate: float
+    left_key_uniqueness: float
+    right_key_uniqueness: float
+    left_null_key_count: int
+    right_null_key_count: int
+    right_duplicate_key_count: int
+    right_duplicate_row_count: int
+    before_row_count: int
+    after_row_count: int
+    row_count_change: int
+    expected_join_type: str
+    many_to_many_risk: bool
+    row_inflation: bool
+    fact_to_fact_risk: bool
+    blocked: bool
+    block_reasons: tuple[str, ...]
+    risk_flags: tuple[str, ...]
+
+
+def canonicalize_key_series(series: pd.Series, comparison_kind: str) -> pd.Series:
+    """Return a normalized copy used for relationship comparison and safe joins."""
+    if comparison_kind == "date":
+        parsed = pd.to_datetime(series, errors="coerce", format="mixed")
+        return parsed.dt.normalize().dt.strftime("%Y-%m-%d").astype("string")
+
+    values = series.astype("string").str.strip()
+    values = values.mask(values.eq(""))
+
+    if comparison_kind == "numeric":
+        cleaned = values.str.replace(",", "", regex=False)
+        numeric = pd.to_numeric(cleaned, errors="coerce")
+        normalized = numeric.map(
+            lambda value: format(value, ".15g") if pd.notna(value) else pd.NA
+        )
+        return normalized.astype("string")
+
+    return values.str.casefold()
+
+
+def _canonicalize_keys(
+    frame: pd.DataFrame,
+    columns: tuple[str, ...],
+    comparison_kinds: tuple[str, ...],
+) -> pd.Series:
+    parts = [
+        canonicalize_key_series(frame[column], kind).rename(str(index))
+        for index, (column, kind) in enumerate(zip(columns, comparison_kinds))
+    ]
+    key_frame = pd.concat(parts, axis=1)
+    valid = key_frame.notna().all(axis=1)
+    valid_frame = key_frame.loc[valid]
+
+    if len(columns) == 1:
+        return valid_frame.iloc[:, 0]
+
+    tuples = list(valid_frame.itertuples(index=False, name=None))
+    return pd.Series(tuples, index=valid_frame.index, dtype="object")
+
+
+def _uniqueness(counts: pd.Series) -> float:
+    row_count = int(counts.sum())
+    return float(len(counts) / row_count) if row_count else 0.0
+
+
+def evaluate_join_safety(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    left_columns: tuple[str, ...],
+    right_columns: tuple[str, ...],
+    comparison_kinds: tuple[str, ...],
+    left_role: str,
+    right_role: str,
+) -> JoinSafetyAssessment:
+    """Compute join cardinality and row inflation without performing a merge."""
+    if len(left_columns) != len(right_columns):
+        raise ValueError("Left and right relationship keys must have equal lengths.")
+    if len(left_columns) != len(comparison_kinds):
+        raise ValueError("Every relationship key needs a comparison kind.")
+
+    left_keys = _canonicalize_keys(left, left_columns, comparison_kinds)
+    right_keys = _canonicalize_keys(right, right_columns, comparison_kinds)
+    left_counts = left_keys.value_counts(dropna=True, sort=False)
+    right_counts = right_keys.value_counts(dropna=True, sort=False)
+    left_null_key_count = int(len(left) - len(left_keys))
+    right_null_key_count = int(len(right) - len(right_keys))
+
+    right_index = right_counts.index
+    matched_left_counts = left_counts[left_counts.index.isin(right_index)]
+    matched_row_count = int(matched_left_counts.sum())
+    match_rate = float(matched_row_count / len(left)) if len(left) else 0.0
+    distinct_overlap_rate = (
+        float(len(matched_left_counts) / len(left_counts)) if len(left_counts) else 0.0
+    )
+
+    right_duplicates = right_counts[right_counts > 1]
+    right_duplicate_key_count = int(len(right_duplicates))
+    right_duplicate_row_count = int(right_duplicates.sum())
+
+    left_duplicate_keys = set(left_counts[left_counts > 1].index)
+    right_duplicate_keys = set(right_duplicates.index)
+    many_to_many_keys = left_duplicate_keys.intersection(right_duplicate_keys)
+    many_to_many_risk = bool(many_to_many_keys)
+
+    right_multiplicity = right_counts.reindex(left_counts.index).fillna(1)
+    additional_rows = int(
+        ((right_multiplicity - 1).clip(lower=0) * left_counts).sum()
+    )
+    before_row_count = int(len(left))
+    after_row_count = before_row_count + additional_rows
+    row_inflation = additional_rows > 0
+
+    left_key_uniqueness = _uniqueness(left_counts)
+    right_key_uniqueness = _uniqueness(right_counts)
+    left_is_unique = not left_counts.empty and left_key_uniqueness == 1.0
+    right_is_unique = not right_counts.empty and right_key_uniqueness == 1.0
+    if left_is_unique and right_is_unique:
+        expected_join_type = "one_to_one"
+    elif right_is_unique:
+        expected_join_type = "many_to_one"
+    elif left_is_unique:
+        expected_join_type = "one_to_many"
+    else:
+        expected_join_type = "many_to_many"
+
+    fact_to_fact_risk = left_role == "fact" and right_role == "fact"
+    block_reasons: list[str] = []
+    risk_flags: list[str] = []
+
+    if right_null_key_count:
+        risk_flags.append("right_key_nulls")
+        block_reasons.append(
+            f"Right relationship key contains {right_null_key_count} null key row(s)."
+        )
+    if right_duplicate_key_count:
+        risk_flags.append("right_key_not_unique")
+        block_reasons.append(
+            "Right key is not unique: "
+            f"{right_duplicate_key_count} duplicate key group(s) across "
+            f"{right_duplicate_row_count} row(s)."
+        )
+    if many_to_many_risk:
+        risk_flags.append("many_to_many")
+        block_reasons.append(
+            "Many-to-many risk: at least one matched key repeats on both tables."
+        )
+    if row_inflation:
+        risk_flags.append("row_inflation")
+        block_reasons.append(
+            "Dry-run left join would increase rows from "
+            f"{before_row_count} to {after_row_count} (+{additional_rows})."
+        )
+    if fact_to_fact_risk:
+        risk_flags.append("fact_to_fact")
+        block_reasons.append(
+            "Both tables are classified as fact tables; their grains may differ."
+        )
+
+    return JoinSafetyAssessment(
+        match_rate=match_rate,
+        distinct_overlap_rate=distinct_overlap_rate,
+        left_key_uniqueness=left_key_uniqueness,
+        right_key_uniqueness=right_key_uniqueness,
+        left_null_key_count=left_null_key_count,
+        right_null_key_count=right_null_key_count,
+        right_duplicate_key_count=right_duplicate_key_count,
+        right_duplicate_row_count=right_duplicate_row_count,
+        before_row_count=before_row_count,
+        after_row_count=after_row_count,
+        row_count_change=additional_rows,
+        expected_join_type=expected_join_type,
+        many_to_many_risk=many_to_many_risk,
+        row_inflation=row_inflation,
+        fact_to_fact_risk=fact_to_fact_risk,
+        blocked=bool(block_reasons),
+        block_reasons=tuple(block_reasons),
+        risk_flags=tuple(risk_flags),
+    )

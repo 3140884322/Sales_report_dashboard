@@ -15,6 +15,8 @@ from multi_table_loader import (
     load_multi_table_dataset,
     read_csv_with_encoding_fallback,
 )
+from generic_relationship_ui import render_generic_relationship_mode
+from generic_report_generation import return_analysis_available
 
 
 EXCEL_MIME_TYPE = (
@@ -567,19 +569,22 @@ def show_monthly_revenue_trend(report_tables):
         st.info("Monthly revenue data is not available.")
         return
 
+    hover_data = {
+        "revenue": ":$,.2f",
+        "orders": ":,",
+        "units": ":,",
+        "AOV": ":$,.2f",
+    }
+    if return_analysis_available(report_tables):
+        hover_data["return_rate"] = ":.1%"
+
     fig = px.line(
         monthly,
         x="year_month",
         y="revenue",
         markers=True,
         title="Monthly Revenue Trend",
-        hover_data={
-            "revenue": ":$,.2f",
-            "orders": ":,",
-            "units": ":,",
-            "AOV": ":$,.2f",
-            "return_rate": ":.1%",
-        },
+        hover_data=hover_data,
     )
     fig.update_yaxes(tickprefix="$", separatethousands=True)
     fig.update_layout(xaxis_title="Month", yaxis_title="Revenue")
@@ -829,7 +834,10 @@ def show_visual_dashboard(report_result):
     third_left, third_right = st.columns(2)
 
     with third_left:
-        show_monthly_return_rate_chart(report_tables)
+        if return_analysis_available(report_tables):
+            show_monthly_return_rate_chart(report_tables)
+        else:
+            st.info("Return data was not provided. Return analysis was skipped.")
 
     with third_right:
         show_anomalies_by_type_chart(report_tables)
@@ -943,6 +951,16 @@ def make_action_required_table(report_result):
                 "Severity": "Info",
                 "Business Impact": "Cash flow analysis was skipped.",
                 "Suggested Action": "Upload expenses.csv if cash flow reporting is needed.",
+            }
+        )
+
+    if not return_analysis_available(report_tables):
+        rows.append(
+            {
+                "Issue": "Return data unavailable",
+                "Severity": "Info",
+                "Business Impact": "Return rates and return anomalies were not calculated.",
+                "Suggested Action": "Provide a returned field if return analysis is required.",
             }
         )
 
@@ -1062,6 +1080,21 @@ def show_detail_tables(report_result):
     show_table_expander("Anomalies", report_tables["anomalies"])
     show_table_expander("Validation Report", report_tables["validation_report"])
     show_table_expander("Data Quality Checks", data_quality_checks)
+    if "data_preparation_summary" in report_tables:
+        show_table_expander(
+            "Data Preparation Summary",
+            report_tables["data_preparation_summary"],
+        )
+    if "field_availability" in report_tables:
+        show_table_expander(
+            "Field Availability",
+            report_tables["field_availability"],
+        )
+    if "excluded_rows_detail" in report_tables:
+        show_table_expander(
+            "Excluded Rows Detail",
+            report_tables["excluded_rows_detail"],
+        )
 
 
 def show_report_status(status, reason):
@@ -1229,7 +1262,30 @@ def show_report_dashboard(report_result):
         )
 
     if not report_result["expenses_uploaded"]:
-        st.info("Expense file was not uploaded. Cash flow analysis was skipped.")
+        st.info("Finance Analysis Skipped. Expense file was not uploaded.")
+
+    if report_result.get("report_kind") == "generic":
+        st.subheader("Data Preparation Summary")
+        st.dataframe(
+            report_result["data_preparation_summary"].astype("string"),
+            hide_index=True,
+            use_container_width=True,
+        )
+        if report_result.get("excluded_row_count"):
+            st.warning(
+                f"{report_result['excluded_row_count']:,} row(s) were explicitly "
+                "excluded from all report calculations."
+            )
+        if report_result.get("monthly_analysis_excluded_row_count"):
+            st.warning(
+                f"{report_result['monthly_analysis_excluded_row_count']:,} row(s) "
+                "with invalid dates were excluded from monthly analysis only."
+            )
+        if not return_analysis_available(report_result["report_tables"]):
+            st.info("Return data was not provided. Return analysis was skipped.")
+            st.caption(
+                "Return adjustments were not applied because return status was unavailable."
+            )
 
     show_kpi_cards(report_result["report_tables"])
     show_visual_dashboard(report_result)
@@ -1734,7 +1790,11 @@ def render_multi_table_mode():
 
 mode = st.radio(
     "Data Import Mode",
-    ["Single Table Mode", "Multi-table Dataset Mode"],
+    [
+        "Single Table Mode",
+        "Multi-table Dataset Mode",
+        "Generic Relationship Mode",
+    ],
     index=0,
     horizontal=True,
 )
@@ -1745,5 +1805,9 @@ if st.session_state.get("active_import_mode") != mode:
 
 if mode == "Single Table Mode":
     render_single_table_mode()
-else:
+elif mode == "Multi-table Dataset Mode":
     render_multi_table_mode()
+else:
+    generic_report_result = render_generic_relationship_mode()
+    if generic_report_result is not None:
+        show_report_dashboard(generic_report_result)
