@@ -1,0 +1,23 @@
+{
+  "orders_columns": {
+    "order_id": "订单编号",
+    "date": "下单日期",
+    "customer_id": "客户ID",
+    "product_id": "商品编号",
+    "unit_price": "单价",
+    "quantity": "数量",
+    "discount_rate": "折扣率",
+    "returned": "是否退货",
+    "category": "品类",
+    "customer_name": "客户名称",
+    "product_name": "商品名称"
+  },
+  "expenses_columns": {
+    "expense_id": "费用编号",
+    "date": "费用日期",
+    "expense_category": "费用类别",
+    "amount": "金额",
+    "vendor": "供应商",
+    "description": "描述"
+  }
+}

@@ -1,0 +1,5 @@
+expense_id,date,expense_category,amount,vendor,description
+QE001,2026-01-03,Rent,250,Main Street Properties,Valid expense
+QE002,bad-date,Payroll,300,Internal Team,Invalid expense date example
+QE003,2026-02-18,Software,abc,Cloud Tools,Invalid amount example
+QE004,2026-02-22,Marketing,-50,Local Ads,Negative amount example

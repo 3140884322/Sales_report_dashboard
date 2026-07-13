@@ -1,0 +1,25 @@
+expense_id,date,expense_category,amount,vendor,description
+E001,2026-01-03,Rent,250,Main Street Properties,Shared office rent
+E002,2026-01-08,Payroll,300,Internal Team,Part-time operations support
+E003,2026-01-18,Software,60,Cloud Tools,Reporting and ecommerce tools
+E004,2026-01-26,Marketing,90,Local Ads,January campaign
+E005,2026-02-04,Rent,250,Main Street Properties,Shared office rent
+E006,2026-02-10,Payroll,340,Internal Team,Part-time operations support
+E007,2026-02-18,Logistics,180,ShipFast,Outbound shipping
+E008,2026-02-22,Marketing,250,Local Ads,February campaign
+E009,2026-03-04,Rent,250,Main Street Properties,Shared office rent
+E010,2026-03-11,Payroll,350,Internal Team,Part-time operations support
+E011,2026-03-19,Software,60,Cloud Tools,Reporting and ecommerce tools
+E012,2026-03-27,Marketing,100,Local Ads,Spring promotion
+E013,2026-04-04,Rent,250,Main Street Properties,Shared office rent
+E014,2026-04-12,Payroll,360,Internal Team,Part-time operations support
+E015,2026-04-17,Logistics,160,ShipFast,Returned goods handling
+E016,2026-04-24,Marketing,190,Local Ads,Customer acquisition push
+E017,2026-05-04,Rent,250,Main Street Properties,Shared office rent
+E018,2026-05-10,Payroll,370,Internal Team,Part-time operations support
+E019,2026-05-16,Software,80,Cloud Tools,New analytics add-on
+E020,2026-05-25,Marketing,130,Local Ads,May campaign
+E021,2026-06-04,Rent,250,Main Street Properties,Shared office rent
+E022,2026-06-09,Payroll,380,Internal Team,Part-time operations support
+E023,2026-06-17,Logistics,250,ShipFast,Outbound shipping
+E024,2026-06-28,Marketing,240,Local Ads,June campaign

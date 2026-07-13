@@ -1,0 +1,7 @@
+order_id,date,customer_id,customer_name,product_id,product_name,category,unit_price,quantity,discount_rate,returned
+C1001,2026-01-05,C001,Northwind Cafe,P001,Espresso Beans,Beverage,18,20,0.05,false
+C1002,2026-01-15,C002,River Market,P002,Green Tea,Beverage,12,30,0.00,false
+C1003,2026-02-08,C001,Northwind Cafe,P004,Protein Bar,Food,25,30,0.05,false
+C1004,2026-02-18,C003,City Books,P003,Notebook,Office,5,40,0.10,false
+C1005,2026-03-06,C004,Harbor Studio,P005,Desk Mat,Office,15,30,0.05,false
+C1006,2026-03-22,C005,Lake Fitness,P006,Water Bottle,Accessory,60,6,0.00,false

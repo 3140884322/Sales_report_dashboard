@@ -1,0 +1,7 @@
+expense_id,date,expense_category,amount,vendor,description
+CE001,2026-01-03,Rent,250,Main Street Properties,Shared office rent
+CE002,2026-01-08,Payroll,300,Internal Team,Part-time operations support
+CE003,2026-02-04,Rent,250,Main Street Properties,Shared office rent
+CE004,2026-02-18,Software,80,Cloud Tools,Reporting tools
+CE005,2026-03-04,Rent,250,Main Street Properties,Shared office rent
+CE006,2026-03-17,Marketing,120,Local Ads,Spring campaign

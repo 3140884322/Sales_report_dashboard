@@ -1,0 +1,21 @@
+order_id,date,customer_id,customer_name,product_id,product_name,category,unit_price,quantity,discount_rate,returned
+1001,2026-01-05,C001,Northwind Cafe,P001,Espresso Beans,Beverage,18,20,0.05,false
+1002,2026-01-12,C002,River Market,P002,Green Tea,Beverage,12,30,0.00,false
+1003,2026-01-20,C003,City Books,P003,Notebook,Office,5,40,0.10,false
+1004,2026-02-03,C001,Northwind Cafe,P004,Protein Bar,Food,25,30,0.05,false
+1005,2026-02-14,C004,Harbor Studio,P005,Desk Mat,Office,15,40,0.10,false
+1006,2026-02-22,C005,Lake Fitness,P006,Water Bottle,Accessory,60,5,0.00,false
+1007,2026-03-02,C002,River Market,P001,Espresso Beans,Beverage,18,15,0.05,false
+1008,2026-03-15,C003,City Books,P002,Green Tea,Beverage,12,20,0.00,false
+1009,2026-03-25,C006,Metro Gifts,P003,Notebook,Office,5,30,0.10,false
+1010,2026-04-04,C001,Northwind Cafe,P004,Protein Bar,Food,25,20,0.05,false
+1011,2026-04-11,C004,Harbor Studio,P005,Desk Mat,Office,15,20,0.00,true
+1012,2026-04-18,C005,Lake Fitness,P006,Water Bottle,Accessory,60,4,0.35,false
+1013,2026-04-26,C006,Metro Gifts,P003,Notebook,Office,5,50,0.00,true
+1014,2026-05-06,C002,River Market,P001,Espresso Beans,Beverage,18,30,0.00,false
+1015,2026-05-12,C003,City Books,P002,Green Tea,Beverage,12,25,0.40,false
+1016,2026-05-28,C005,Lake Fitness,P006,Water Bottle,Accessory,60,6,0.10,false
+1017,2026-06-03,C001,Northwind Cafe,P004,Protein Bar,Food,25,25,0.05,false
+1018,2026-06-10,C006,Metro Gifts,P003,Notebook,Office,5,100,0.00,false
+1019,2026-06-18,C004,Harbor Studio,P005,Desk Mat,Office,15,30,0.05,true
+1020,2026-06-29,C005,Lake Fitness,P006,Water Bottle,Accessory,60,10,0.00,false
