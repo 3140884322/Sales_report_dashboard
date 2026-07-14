@@ -30,6 +30,10 @@ from relationship_discovery import (
 
 
 BUTTON_SUPPORTS_ICON = "icon" in inspect.signature(st.button).parameters
+SINGLE_TABLE_ROUTE_MESSAGE = (
+    "One table was detected. No table relationships are required. "
+    "Continue to field mapping."
+)
 
 
 def _button(label, icon=None, **kwargs):
@@ -436,12 +440,61 @@ def _diagnostic_records(merge_result):
     ]
 
 
+def build_single_table_join_result(discovery_result):
+    """Build and execute the zero-relationship plan for a one-table upload."""
+    if len(discovery_result.tables) != 1:
+        raise ValueError("Single-table routing requires exactly one detected table.")
+
+    fact_table_id = discovery_result.tables[0].table_id
+    plan = build_approved_join_plan(discovery_result, fact_table_id, {})
+    merge_result = execute_approved_join_plan(discovery_result, plan)
+    return plan, merge_result
+
+
+def _initialize_discovery_state(discovery_result):
+    st.session_state["generic_discovery_result"] = discovery_result
+    st.session_state["generic_relationship_decisions"] = {}
+    st.session_state["generic_edited_candidates"] = {}
+    st.session_state.pop("generic_fact_table_id", None)
+    st.session_state.pop("generic_fact_table_snapshot", None)
+    invalidate_generic_plan_state(st.session_state)
+
+
+def _render_single_table_route(discovery_result):
+    table = discovery_result.tables[0]
+    plan = st.session_state.get("generic_approved_plan")
+    merge_result = st.session_state.get("generic_merge_result")
+    if plan is None or merge_result is None:
+        plan, merge_result = build_single_table_join_result(discovery_result)
+        st.session_state["generic_fact_table_id"] = table.table_id
+        st.session_state["generic_fact_table_snapshot"] = table.table_id
+        st.session_state["generic_approved_plan"] = plan
+        st.session_state["generic_merge_result"] = merge_result
+
+    st.info(SINGLE_TABLE_ROUTE_MESSAGE)
+    route_metrics = st.columns(3)
+    route_metrics[0].metric("Main transaction table", table.table_name)
+    route_metrics[1].metric("Rows", f"{len(table.frame):,}")
+    route_metrics[2].metric("Confirmed relationships", "0")
+
+    if not merge_result.success or merge_result.merged_frame is None:
+        st.error(merge_result.error_message or "Single-table preparation failed.")
+        return None
+
+    return render_generic_standard_mapping(
+        merge_result,
+        discovery_result=discovery_result,
+        plan=plan,
+        decisions={},
+    )
+
+
 def _render_plan_and_merge(discovery_result, fact_table_id):
     decisions = st.session_state.get("generic_relationship_decisions", {})
     approved_count = sum(
         decision.status == "approved" for decision in decisions.values()
     )
-    st.subheader("Step 4: Approved Join Plan")
+    st.subheader("Approved Join Plan")
     st.write(f"Explicitly approved relationships: {approved_count}")
     build_clicked = _button(
         "Build Approved Join Plan",
@@ -501,7 +554,7 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
     if merge_result is None:
         return
 
-    st.subheader("Step 5: Merge Execution Summary")
+    st.subheader("Merge Execution Summary")
     if merge_result.success:
         st.success("Approved join plan completed without row growth.")
     else:
@@ -533,10 +586,10 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
 
 
 def render_generic_relationship_mode():
-    """Render B1 discovery, explicit decisions, plan validation, and safe merge."""
-    st.subheader("Step 1: Upload Tables")
+    """Render the unified one-or-more-table data preparation flow."""
+    st.subheader("Upload")
     uploaded_files = st.file_uploader(
-        "CSV or xlsx files",
+        "Sales data files",
         type=["csv", "xlsx"],
         accept_multiple_files=True,
         key="generic_uploaded_files",
@@ -548,27 +601,16 @@ def render_generic_relationship_mode():
     if files_changed and uploaded_files:
         st.info("Files changed. Previous discovery, decisions, plan, and merge output were cleared.")
 
-    discover_clicked = _button(
-        "Discover Relationships",
-        icon=":material/search:",
-        key="generic_discover_relationships",
-        disabled=not uploaded_files,
-    )
-    if discover_clicked:
+    discovery_result = st.session_state.get("generic_discovery_result")
+    if uploaded_files and discovery_result is None:
         try:
-            with st.spinner("Profiling tables and discovering relationships..."):
+            with st.spinner("Reading and profiling uploaded tables..."):
                 discovery_result = discover_relationships_from_sources(uploaded_files)
-            st.session_state["generic_discovery_result"] = discovery_result
-            st.session_state["generic_relationship_decisions"] = {}
-            st.session_state["generic_edited_candidates"] = {}
-            st.session_state.pop("generic_fact_table_id", None)
-            st.session_state.pop("generic_fact_table_snapshot", None)
-            invalidate_generic_plan_state(st.session_state)
-            st.rerun()
+            _initialize_discovery_state(discovery_result)
         except Exception as error:
             st.error(f"Relationship discovery failed: {error}")
+            return None
 
-    discovery_result = st.session_state.get("generic_discovery_result")
     if discovery_result is None:
         return
 
@@ -582,10 +624,13 @@ def render_generic_relationship_mode():
             },
         )
 
-    st.subheader("Step 2: Select Fact Table")
+    if len(discovery_result.tables) == 1:
+        return _render_single_table_route(discovery_result)
+
+    st.subheader("Select Main Transaction Table")
     table_ids = [profile.table_id for profile in discovery_result.table_profiles]
     fact_table_id = st.selectbox(
-        "Fact table",
+        "Main transaction table",
         [None] + table_ids,
         index=0,
         format_func=lambda value: (
@@ -599,7 +644,7 @@ def render_generic_relationship_mode():
         st.session_state["generic_fact_table_snapshot"] = fact_table_id
         invalidate_generic_plan_state(st.session_state)
 
-    st.subheader("Step 3: Review Relationship Candidates")
+    st.subheader("Review Relationship Candidates")
     if discovery_result.relationships:
         _render_candidate_groups(discovery_result)
     else:

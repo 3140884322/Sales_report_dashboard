@@ -3,7 +3,6 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 import sys
-import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -14,13 +13,13 @@ from openpyxl import load_workbook
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR))
 
-from analysis import run_pipeline
 from confirmed_relationship_plan import (
     approve_relationship,
     build_approved_join_plan,
     execute_approved_join_plan,
     reject_relationship,
 )
+from generic_relationship_ui import build_single_table_join_result
 from generic_relationship_state import clear_generic_report_if_inputs_changed
 from generic_report_generation import (
     CUSTOMER_NOT_PROVIDED_MESSAGE,
@@ -799,20 +798,109 @@ class MavenGenericEndToEndTests(unittest.TestCase):
         self.assertGreaterEqual(len(rejected_rows), 1)
         self.assertEqual(int(final_rows), 62884)
 
-class ExistingModeCompatibilityTests(unittest.TestCase):
-    def test_single_table_pipeline_still_generates_report(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp = Path(temp_dir)
-            tables, excel_path, summary_path = run_pipeline(
-                PROJECT_DIR / "input" / "sample_orders.csv",
-                PROJECT_DIR / "input" / "sample_expenses.csv",
-                temp / "single.xlsx",
-                temp / "single.md",
-            )
+class UnifiedSingleTableEndToEndTests(unittest.TestCase):
+    @staticmethod
+    def coffee_frame():
+        return pd.DataFrame(
+            {
+                "transaction_id": [1, 2, 3, 4],
+                "transaction_date": [
+                    "2024-01-02",
+                    "2024-01-03",
+                    "2024-02-01",
+                    "2024-02-02",
+                ],
+                "transaction_time": ["08:15", "09:20", "10:10", "11:45"],
+                "transaction_qty": [2, 1, 3, 2],
+                "store_id": [5, 5, 8, 8],
+                "store_location": ["Astoria", "Astoria", "Lower Manhattan", "Lower Manhattan"],
+                "product_id": ["COF-1", "TEA-1", "COF-1", "COF-2"],
+                "unit_price": [3.5, 4.0, 3.5, 5.0],
+                "product_category": ["Coffee", "Tea", "Coffee", "Coffee"],
+                "product_type": [
+                    "Gourmet brewed coffee",
+                    "Brewed Chai tea",
+                    "Gourmet brewed coffee",
+                    "Barista Espresso",
+                ],
+            }
+        )
 
-            self.assertFalse(tables["enriched_orders"].empty)
-            self.assertTrue(excel_path.exists())
-            self.assertTrue(summary_path.exists())
+    @classmethod
+    def run_source(cls, source):
+        discovery = discover_relationships(read_tabular_sources(source))
+        plan, merge_result = build_single_table_join_result(discovery)
+        recommendations = recommend_standard_field_mappings(
+            merge_result.merged_frame
+        )
+        mapping = generate_unified_orders(
+            merge_result.merged_frame,
+            selections_from_recommendations(recommendations, confirmed=True),
+        )
+        preflight = run_generic_report_preflight(
+            mapping,
+            original_fact_row_count=merge_result.fact_row_count,
+            merged_row_count=merge_result.final_row_count,
+        )
+        report = generate_generic_report(
+            mapping_result=mapping,
+            preflight=preflight,
+            discovery_result=discovery,
+            plan=plan,
+            decisions={},
+        )
+        return discovery, plan, merge_result, mapping, preflight, report
+
+    @classmethod
+    def setUpClass(cls):
+        frame = cls.coffee_frame()
+        csv_source = BytesIO(frame.to_csv(index=False).encode("utf-8"))
+        csv_source.name = "coffee_shop.csv"
+        cls.csv_flow = cls.run_source(csv_source)
+
+        workbook = BytesIO()
+        with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+            frame.to_excel(writer, sheet_name="Transactions", index=False)
+        workbook.seek(0)
+        workbook.name = "coffee_shop.xlsx"
+        cls.xlsx_flow = cls.run_source(workbook)
+
+    def test_coffee_csv_uses_zero_relationship_plan_and_preserves_rows(self):
+        discovery, plan, merge, mapping, preflight, report = self.csv_flow
+
+        self.assertEqual(len(discovery.tables), 1)
+        self.assertEqual(plan.fact_table, "coffee_shop")
+        self.assertEqual(plan.steps, ())
+        self.assertTrue(merge.success)
+        self.assertEqual(merge.fact_row_count, 4)
+        self.assertEqual(merge.final_row_count, 4)
+        self.assertEqual(len(mapping.unified_orders), 4)
+        self.assertTrue(preflight.can_generate)
+        self.assertEqual(report["status"], "ready")
+
+    def test_coffee_csv_has_no_customer_analysis_and_has_downloads(self):
+        report = self.csv_flow[-1]
+        customer = report["field_availability"].loc[
+            report["field_availability"]["field_name"] == "customer_id"
+        ].iloc[0]
+
+        self.assertEqual(customer["availability_status"], "not_provided")
+        self.assertFalse(customer_analysis_available(report["report_tables"]))
+        self.assertTrue(report["report_tables"]["customer_summary"].empty)
+        self.assertGreater(len(report["excel_bytes"]), 1_000)
+        self.assertTrue(report["summary_text"].startswith("# Sales Reporting Summary"))
+
+    def test_one_sheet_xlsx_generates_the_same_ready_report(self):
+        discovery, plan, merge, mapping, preflight, report = self.xlsx_flow
+
+        self.assertEqual(len(discovery.tables), 1)
+        self.assertEqual(discovery.tables[0].sheet_name, "Transactions")
+        self.assertEqual(plan.steps, ())
+        self.assertEqual(merge.final_row_count, 4)
+        self.assertEqual(len(mapping.unified_orders), 4)
+        self.assertTrue(preflight.can_generate)
+        self.assertEqual(report["status"], "ready")
+        self.assertGreater(len(report["excel_bytes"]), 1_000)
 
 
 if __name__ == "__main__":

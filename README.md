@@ -11,22 +11,17 @@ summary.
 The project is designed as a GitHub-ready starter project for AI-assisted sales
 reporting automation.
 
-## Application Modes
+## Application Flow
 
-The Streamlit app provides two data import modes:
+The Streamlit app has one **Upload Sales Data** entry for one or more CSV/XLSX
+files. It profiles the uploaded tables before choosing the next step.
 
-1. **Single Table Mode**
-   Upload one table that already contains the sales transaction fields.
-
-2. **Multi-Table Dataset Mode**
-   Upload multiple related sales, order, product, customer, store, or other
-   business tables. The system will help identify their relationships and
-   safely combine them.
-
-Multi-Table Dataset Mode discovers candidate relationships and waits for the
-user to approve, edit, or reject them. It then validates a confirmed join plan,
-performs safe many-to-one merges, maps standard fields, runs report preflight,
-and generates the existing dashboard, Excel, and Markdown outputs.
+When one table is detected, the app selects it as the main transaction table,
+creates a valid zero-relationship plan, and continues directly to standard
+field mapping. When multiple tables are detected, the app discovers candidate
+relationships and waits for the user to approve, edit, or reject them before
+performing safe many-to-one merges. Both paths then use the same field mapping,
+preflight, dashboard, Excel, and Markdown report flow.
 
 ## Input Files
 
@@ -72,10 +67,9 @@ Orders file:
 - `discount_rate`
 - `returned`
 
-In Multi-Table Dataset Mode, `customer_id` is optional. When it is unavailable
+In the Streamlit upload flow, `customer_id` is optional. When it is unavailable
 or only partially provided, customer analysis is skipped without generating a
-temporary customer identifier. Single Table Mode keeps its existing required
-column behavior.
+temporary customer identifier.
 
 Optional order columns:
 

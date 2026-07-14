@@ -205,7 +205,7 @@ def render_generic_report_generation(
     mapping_result,
 ):
     """Render B2.2 preflight, explicit confirmation, and cached report generation."""
-    st.subheader("Step 8: Report Preflight Review")
+    st.subheader("Report Preflight Review")
     expenses_file = st.file_uploader(
         "expenses.csv (optional)",
         type=["csv"],

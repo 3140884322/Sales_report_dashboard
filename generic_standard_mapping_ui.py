@@ -305,7 +305,7 @@ def render_generic_standard_mapping(
     if not merge_result.success or frame is None:
         return
 
-    st.subheader("Step 6: Standard Field Mapping")
+    st.subheader("Standard Field Mapping")
     _render_size_guard(frame)
     source_entity_roles = build_source_entity_role_map(
         discovery_result, merge_result.fact_table_id
@@ -381,11 +381,9 @@ def render_generic_standard_mapping(
     if result is None:
         return
 
-    st.subheader("Step 7: Unified Orders Preview")
+    st.subheader("Unified Orders Preview")
     if result.success:
-        st.success(
-            "Standard field mapping passed. run_pipeline has not been called in B2.1."
-        )
+        st.success("Standard field mapping passed.")
     else:
         st.error("Standard field mapping is blocked.")
     for error in result.errors:
