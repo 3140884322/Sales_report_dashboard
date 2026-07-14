@@ -154,6 +154,8 @@ def validate_join_steps(
     if fact_table_id not in table_ids:
         return (), (f"Selected fact table {fact_table_id!r} does not exist.",)
     if not steps:
+        if len(discovery_result.tables) == 1:
+            return (), ()
         return (), ("At least one relationship must be explicitly approved.",)
 
     for step in steps:

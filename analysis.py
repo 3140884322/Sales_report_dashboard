@@ -1652,7 +1652,7 @@ def generate_summary_markdown(report_tables, summary_path=DEFAULT_SUMMARY_OUTPUT
         monthly["revenue_growth_rate"].notna() & ~finite_growth_mask
     ]
     top_category = categories.iloc[0]
-    top_customer = customers.iloc[0]
+    top_customer = customers.iloc[0] if not customers.empty else None
     top_product = products.iloc[0]
 
     lines = [
@@ -1737,18 +1737,19 @@ def generate_summary_markdown(report_tables, summary_path=DEFAULT_SUMMARY_OUTPUT
 
     insight_prefix = "Based on currently usable rows, " if report_failed else ""
 
+    lines.append(
+        f"- {insight_prefix}{top_category['category']} was the leading "
+        f"category, generating {format_money(top_category['revenue'])} "
+        "in revenue."
+    )
+    if top_customer is not None:
+        lines.append(
+            f"- {insight_prefix}{top_customer['customer_name']} was the "
+            f"highest-revenue customer, contributing "
+            f"{format_money(top_customer['revenue'])}."
+        )
     lines.extend(
         [
-            (
-                f"- {insight_prefix}{top_category['category']} was the leading "
-                f"category, generating {format_money(top_category['revenue'])} "
-                "in revenue."
-            ),
-            (
-                f"- {insight_prefix}{top_customer['customer_name']} was the "
-                f"highest-revenue customer, contributing "
-                f"{format_money(top_customer['revenue'])}."
-            ),
             (
                 f"- {insight_prefix}{top_product['product_name']} was the "
                 f"highest-revenue product, contributing "

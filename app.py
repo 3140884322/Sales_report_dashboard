@@ -16,7 +16,11 @@ from multi_table_loader import (
     read_csv_with_encoding_fallback,
 )
 from generic_relationship_ui import render_generic_relationship_mode
-from generic_report_generation import return_analysis_available
+from generic_report_generation import (
+    customer_analysis_available,
+    customer_analysis_unavailable_message,
+    return_analysis_available,
+)
 
 
 EXCEL_MIME_TYPE = (
@@ -541,11 +545,19 @@ def show_kpi_cards(report_tables):
     first_row[2].metric("Total Units", format_number(metrics["total_units"]))
     first_row[3].metric("Overall AOV", format_money(metrics["overall_aov"]))
 
-    second_row = st.columns(4)
+    customer_available = customer_analysis_available(report_tables)
+    second_row = st.columns(4 if customer_available else 3)
     second_row[0].metric("Top Category", metrics["top_category"] or "N/A")
     second_row[1].metric("Top Product", metrics["top_product"] or "N/A")
-    second_row[2].metric("Top Customer", metrics["top_customer"] or "N/A")
-    second_row[3].metric("Anomaly Count", format_number(metrics["anomaly_count"]))
+    if customer_available:
+        second_row[2].metric("Top Customer", metrics["top_customer"] or "N/A")
+        second_row[3].metric(
+            "Anomaly Count", format_number(metrics["anomaly_count"])
+        )
+    else:
+        second_row[2].metric(
+            "Anomaly Count", format_number(metrics["anomaly_count"])
+        )
 
 
 def clean_time_axis(table):
@@ -829,7 +841,10 @@ def show_visual_dashboard(report_result):
         show_top_products_chart(report_tables)
 
     with second_right:
-        show_top_customers_chart(report_tables)
+        if customer_analysis_available(report_tables):
+            show_top_customers_chart(report_tables)
+        else:
+            st.info(customer_analysis_unavailable_message(report_tables))
 
     third_left, third_right = st.columns(2)
 
@@ -964,6 +979,16 @@ def make_action_required_table(report_result):
             }
         )
 
+    if not customer_analysis_available(report_tables):
+        rows.append(
+            {
+                "Issue": "Customer data unavailable",
+                "Severity": "Info",
+                "Business Impact": "Customer rankings and lifecycle analysis were skipped.",
+                "Suggested Action": "Provide customer_id if customer analysis is required.",
+            }
+        )
+
     if not anomalies.empty:
         for anomaly_type, count in anomalies["anomaly_type"].value_counts().items():
             rows.append(
@@ -1072,7 +1097,8 @@ def show_detail_tables(report_result):
     show_table_expander("Monthly Summary", report_tables["monthly_summary"])
     show_table_expander("Category Summary", report_tables["category_summary"])
     show_table_expander("Top Products", report_tables["top_products"])
-    show_table_expander("Top Customers", report_tables["customer_summary"])
+    if customer_analysis_available(report_tables):
+        show_table_expander("Top Customers", report_tables["customer_summary"])
     show_table_expander(
         "Duplicate Rows Detail",
         report_result["duplicate_rows_detail"],
@@ -1285,6 +1311,12 @@ def show_report_dashboard(report_result):
             st.info("Return data was not provided. Return analysis was skipped.")
             st.caption(
                 "Return adjustments were not applied because return status was unavailable."
+            )
+        if not customer_analysis_available(report_result["report_tables"]):
+            st.info(
+                customer_analysis_unavailable_message(
+                    report_result["report_tables"]
+                )
             )
 
     show_kpi_cards(report_result["report_tables"])

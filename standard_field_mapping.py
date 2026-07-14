@@ -19,8 +19,15 @@ from standard_field_models import (
 )
 
 
-REQUIRED_STANDARD_FIELDS = tuple(REQUIRED_COLUMNS)
-OPTIONAL_STANDARD_FIELDS = ("customer_name", "product_name", "category")
+REQUIRED_STANDARD_FIELDS = tuple(
+    field for field in REQUIRED_COLUMNS if field != "customer_id"
+)
+OPTIONAL_STANDARD_FIELDS = (
+    "customer_id",
+    "customer_name",
+    "product_name",
+    "category",
+)
 STANDARD_FIELDS = REQUIRED_STANDARD_FIELDS + OPTIONAL_STANDARD_FIELDS
 SEVERE_CONVERSION_FAILURE_RATE = 0.05
 RECOMMENDATION_THRESHOLD = 50.0
@@ -186,7 +193,7 @@ FALSE_VALUES = {
 ALLOWED_STRATEGIES = {
     "order_id": {"source"},
     "date": {"source"},
-    "customer_id": {"source", "temporary_row_id", "temporary_order_id"},
+    "customer_id": {"source", "not_provided", "omit"},
     "product_id": {"source"},
     "unit_price": {"source"},
     "quantity": {"source"},
@@ -406,11 +413,11 @@ def _fallback_recommendation(standard_field: str) -> FieldMappingRecommendation:
             "with nullable values; this does not mean no orders were returned."
         )
     elif standard_field == "customer_id":
-        strategy = "temporary_order_id"
-        confidence = 25.0
+        strategy = "not_provided"
+        confidence = 55.0
         explanation = (
-            "No customer identifier was found. An order-level temporary identifier is "
-            "available with a clear data-quality warning."
+            "No customer identifier was found. Customer data can be marked as not "
+            "provided so customer analysis is skipped without inventing identifiers."
         )
     elif required:
         strategy = "unmapped"
@@ -630,9 +637,12 @@ def _strategy_recommendation(
 
 def _field_availability(
     plan: StandardFieldMappingPlan,
+    output: pd.DataFrame | None = None,
 ) -> tuple[FieldAvailability, ...]:
     records = []
     for selection in plan.selections:
+        provided_row_count = None
+        total_row_count = None
         if selection.strategy == "source":
             status = "provided"
             default_value = None
@@ -663,6 +673,37 @@ def _field_availability(
             default_value = None
             notes = "Optional standard field was not selected."
 
+        if selection.standard_field == "customer_id" and output is not None:
+            total_row_count = len(output)
+            if "customer_id" in output.columns:
+                customer_present = _present_mask(output["customer_id"])
+                provided_row_count = int(customer_present.sum())
+            else:
+                provided_row_count = 0
+
+            count_note = (
+                f"Non-empty customer_id rows: {provided_row_count:,} / "
+                f"{total_row_count:,} valid rows."
+            )
+            if provided_row_count == 0:
+                status = "not_provided"
+                notes = (
+                    "Customer data was not provided. Customer analysis must be skipped. "
+                    + count_note
+                )
+            elif provided_row_count < total_row_count:
+                status = "partially_provided"
+                notes = (
+                    "Customer data was only partially provided. Customer analysis was "
+                    f"skipped. {count_note}"
+                )
+            else:
+                status = "provided"
+                notes = (
+                    f"Mapped from source column {selection.source_column}. "
+                    + count_note
+                )
+
         records.append(
             FieldAvailability(
                 field_name=selection.standard_field,
@@ -671,6 +712,8 @@ def _field_availability(
                 default_value=default_value,
                 user_confirmed=selection.confirmed or selection.strategy == "omit",
                 notes=notes,
+                provided_row_count=provided_row_count,
+                total_row_count=total_row_count,
             )
         )
     return tuple(records)
@@ -716,14 +759,20 @@ def _convert_selection(
             "discount_rate is explicitly set to 0 for every row; this is a business assumption."
         )
     elif selection.strategy == "not_provided":
-        converted = pd.Series(pd.NA, index=frame.index, dtype="boolean")
+        dtype = "boolean" if field == "returned" else "string"
+        converted = pd.Series(pd.NA, index=frame.index, dtype=dtype)
         recommendation = _strategy_recommendation(selection)
         source_non_null_count = 0
         conversion_failure_count = 0
         source_or_strategy = "Data not provided"
-        warnings.append(
-            "returned data was not provided and remains unknown; missing values are not false."
-        )
+        if field == "returned":
+            warnings.append(
+                "returned data was not provided and remains unknown; missing values are not false."
+            )
+        elif field == "customer_id":
+            warnings.append(
+                "Customer data was not provided. Customer analysis was skipped."
+            )
     elif selection.strategy == "temporary_row_id":
         converted = pd.Series(
             [f"TEMP-CUSTOMER-ROW-{index + 1}" for index in range(len(frame))],
@@ -851,8 +900,6 @@ def generate_unified_orders(
             report_columns=(),
         )
 
-    availability = _field_availability(plan)
-
     output = pd.DataFrame(index=frame.index.copy())
     converted_fields = {}
     diagnostics = []
@@ -872,6 +919,8 @@ def generate_unified_orders(
 
     for column in plan.selected_extension_columns:
         output[column] = frame[column].copy(deep=False)
+
+    availability = _field_availability(plan, output)
 
     missing_required = [
         field for field in REQUIRED_STANDARD_FIELDS if field not in output.columns

@@ -173,6 +173,19 @@ class RelationshipDecisionTests(unittest.TestCase):
 
 
 class ApprovedJoinPlanTests(unittest.TestCase):
+    def test_single_table_can_build_and_execute_plan_without_relationships(self):
+        sales, _, _ = basic_frames()
+        result = discover_relationships({"Sales": sales})
+
+        plan = build_approved_join_plan(result, "Sales", [])
+        merge_result = execute_approved_join_plan(result, plan)
+
+        self.assertEqual(plan.steps, ())
+        self.assertTrue(merge_result.success)
+        self.assertEqual(merge_result.fact_row_count, len(sales))
+        self.assertEqual(merge_result.final_row_count, len(sales))
+        assert_frame_equal(merge_result.merged_frame, sales)
+
     def test_fact_table_must_be_explicitly_selected(self):
         result = basic_discovery()
         candidate = candidate_to(result, "Customers", ("CustomerKey",))

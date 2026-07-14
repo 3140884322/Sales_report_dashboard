@@ -68,6 +68,8 @@ class FieldAvailability:
     default_value: object | None
     user_confirmed: bool
     notes: str
+    provided_row_count: int | None = None
+    total_row_count: int | None = None
 
 
 @dataclass

@@ -199,24 +199,44 @@ class MissingFieldStrategyTests(unittest.TestCase):
         self.assertEqual(diagnostic.status, "not_provided")
 
     def test_unified_orders_contains_all_analysis_required_columns(self):
-        self.assertEqual(tuple(REQUIRED_COLUMNS), REQUIRED_STANDARD_FIELDS)
+        self.assertEqual(
+            tuple(field for field in REQUIRED_COLUMNS if field != "customer_id"),
+            REQUIRED_STANDARD_FIELDS,
+        )
         self.assertTrue(set(REQUIRED_COLUMNS).issubset(self.result.unified_orders.columns))
 
-    def test_missing_customer_id_can_use_temporary_order_level_values(self):
+    def test_missing_customer_id_remains_unknown_without_temporary_values(self):
         frame = standard_source_frame().drop(columns=["CustomerKey"])
         result = generate_unified_orders(frame, confirmed_recommendations(frame))
 
         self.assertTrue(result.success, result.errors)
-        self.assertEqual(
-            result.unified_orders["customer_id"].tolist(),
-            [
-                "TEMP-CUSTOMER-ORDER-A-1",
-                "TEMP-CUSTOMER-ORDER-A-2",
-                "TEMP-CUSTOMER-ORDER-A-3",
-                "TEMP-CUSTOMER-ORDER-A-4",
-            ],
+        self.assertTrue(result.unified_orders["customer_id"].isna().all())
+        availability = next(
+            item
+            for item in result.field_availability
+            if item.field_name == "customer_id"
         )
-        self.assertTrue(any("cannot identify customers" in item for item in result.warnings))
+        self.assertEqual(availability.availability_status, "not_provided")
+        self.assertTrue(
+            any("Customer analysis was skipped" in item for item in result.warnings)
+        )
+
+    def test_partially_missing_customer_id_is_recorded(self):
+        frame = standard_source_frame()
+        frame.loc[1, "CustomerKey"] = None
+
+        result = generate_unified_orders(frame, confirmed_recommendations(frame))
+
+        self.assertTrue(result.success, result.errors)
+        availability = next(
+            item
+            for item in result.field_availability
+            if item.field_name == "customer_id"
+        )
+        self.assertEqual(availability.availability_status, "partially_provided")
+        self.assertEqual(availability.provided_row_count, 3)
+        self.assertEqual(availability.total_row_count, 4)
+        self.assertEqual(result.unified_orders["customer_id"].isna().sum(), 1)
 
     def test_only_explicit_extension_columns_are_retained(self):
         frame = standard_source_frame()
@@ -230,6 +250,99 @@ class MissingFieldStrategyTests(unittest.TestCase):
 
         self.assertNotIn("Audit Note", default_result.unified_orders.columns)
         self.assertIn("Audit Note", extended_result.unified_orders.columns)
+
+
+class CustomerAvailabilityBoundaryTests(unittest.TestCase):
+    def _map(self, customer_values=None, *, include_customer=True):
+        frame = standard_source_frame()
+        if include_customer:
+            frame["CustomerKey"] = customer_values
+        else:
+            frame = frame.drop(columns=["CustomerKey"])
+        return generate_unified_orders(frame, confirmed_recommendations(frame))
+
+    def _availability(self, result):
+        return next(
+            item
+            for item in result.field_availability
+            if item.field_name == "customer_id"
+        )
+
+    def test_missing_customer_column_is_not_provided(self):
+        frame = standard_source_frame().drop(columns=["CustomerKey"])
+        selections = confirmed_recommendations(frame)
+        selections = replace_selection(
+            selections,
+            "customer_id",
+            strategy="omit",
+            source_column=None,
+            confirmed=True,
+        )
+        result = generate_unified_orders(frame, selections)
+
+        availability = self._availability(result)
+        self.assertTrue(result.success, result.errors)
+        self.assertNotIn("customer_id", result.unified_orders.columns)
+        self.assertEqual(availability.availability_status, "not_provided")
+        self.assertEqual(availability.provided_row_count, 0)
+        self.assertEqual(availability.total_row_count, 4)
+
+    def test_all_na_customer_values_are_not_provided(self):
+        result = self._map([None, pd.NA, None, pd.NA])
+
+        availability = self._availability(result)
+        self.assertEqual(availability.availability_status, "not_provided")
+        self.assertEqual(availability.provided_row_count, 0)
+
+    def test_empty_and_whitespace_customer_values_are_not_provided(self):
+        result = self._map(["", " ", "   ", "\t"])
+
+        availability = self._availability(result)
+        self.assertEqual(availability.availability_status, "not_provided")
+        self.assertEqual(availability.provided_row_count, 0)
+        self.assertTrue(result.unified_orders["customer_id"].isna().all())
+
+    def test_partially_empty_customer_values_are_partially_provided(self):
+        result = self._map(["C-1", "", "  ", None])
+
+        availability = self._availability(result)
+        self.assertEqual(availability.availability_status, "partially_provided")
+        self.assertEqual(availability.provided_row_count, 1)
+        self.assertEqual(availability.total_row_count, 4)
+        self.assertIn("1 / 4 valid rows", availability.notes)
+
+    def test_all_non_empty_customer_values_are_provided(self):
+        result = self._map(["C-1", "C-2", "C-3", "C-4"])
+
+        availability = self._availability(result)
+        self.assertEqual(availability.availability_status, "provided")
+        self.assertEqual(availability.provided_row_count, 4)
+        self.assertEqual(availability.total_row_count, 4)
+
+    def test_customer_name_is_not_used_as_customer_id(self):
+        frame = standard_source_frame().drop(columns=["CustomerKey"])
+        frame["Customer Name"] = ["Alice", "Bob", "Alice", "Carol"]
+        recommendations = recommend_standard_field_mappings(frame)
+        recommended = {
+            item.standard_field: (
+                item.recommended_strategy,
+                item.recommended_source,
+            )
+            for item in recommendations
+        }
+
+        result = generate_unified_orders(
+            frame,
+            selections_from_recommendations(recommendations, confirmed=True),
+        )
+
+        self.assertEqual(recommended["customer_id"], ("not_provided", None))
+        self.assertEqual(recommended["customer_name"], ("source", "Customer Name"))
+        self.assertTrue(result.unified_orders["customer_id"].isna().all())
+        self.assertEqual(
+            result.unified_orders["customer_name"].tolist(),
+            ["Alice", "Bob", "Alice", "Carol"],
+        )
 
 
 class MavenStandardFieldMappingTests(unittest.TestCase):

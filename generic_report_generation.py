@@ -19,6 +19,12 @@ INVALID_DATE_ACTION_EXCLUDE_MONTHLY = "exclude_from_monthly"
 RETURN_NOT_PROVIDED_MESSAGE = (
     "Return data was not provided. Return analysis was skipped."
 )
+CUSTOMER_NOT_PROVIDED_MESSAGE = (
+    "Customer data was not provided. Customer analysis was skipped."
+)
+CUSTOMER_PARTIALLY_PROVIDED_MESSAGE = (
+    "Customer data was only partially provided. Customer analysis was skipped."
+)
 
 
 class GenericReportGenerationError(RuntimeError):
@@ -37,6 +43,8 @@ def field_availability_table(
                 "default_value": item.default_value,
                 "user_confirmed": item.user_confirmed,
                 "notes": item.notes,
+                "provided_row_count": item.provided_row_count,
+                "total_row_count": item.total_row_count,
             }
             for item in availability
         ],
@@ -47,6 +55,8 @@ def field_availability_table(
             "default_value",
             "user_confirmed",
             "notes",
+            "provided_row_count",
+            "total_row_count",
         ],
     )
 
@@ -63,6 +73,17 @@ def get_field_availability_status(report_tables, field_name: str) -> str:
 
 def return_analysis_available(report_tables) -> bool:
     return get_field_availability_status(report_tables, "returned") == "provided"
+
+
+def customer_analysis_available(report_tables) -> bool:
+    return get_field_availability_status(report_tables, "customer_id") == "provided"
+
+
+def customer_analysis_unavailable_message(report_tables) -> str:
+    status = get_field_availability_status(report_tables, "customer_id")
+    if status == "partially_provided":
+        return CUSTOMER_PARTIALLY_PROVIDED_MESSAGE
+    return CUSTOMER_NOT_PROVIDED_MESSAGE
 
 
 def _availability_status(
@@ -273,6 +294,26 @@ def run_generic_report_preflight(
             f"returned contains {int(frame['returned'].isna().sum()):,} unknown value(s)."
         )
 
+    customer_status = _availability_status(mapping_result, "customer_id")
+    if customer_status == "not_provided":
+        warnings.append(CUSTOMER_NOT_PROVIDED_MESSAGE)
+    elif customer_status == "partially_provided":
+        warnings.append(CUSTOMER_PARTIALLY_PROVIDED_MESSAGE)
+        customer_availability = next(
+            (
+                item
+                for item in mapping_result.field_availability
+                if item.field_name == "customer_id"
+            ),
+            None,
+        )
+        if customer_availability is not None:
+            warnings.append(
+                "Non-empty customer_id rows: "
+                f"{customer_availability.provided_row_count or 0:,} / "
+                f"{customer_availability.total_row_count or len(frame):,} valid rows."
+            )
+
     for optional_field in ("customer_name", "product_name", "category"):
         if optional_field not in frame.columns:
             warnings.append(
@@ -459,6 +500,25 @@ def _adapt_generic_report_tables(
     tables["field_availability"] = availability_table
     tables["data_preparation_summary"] = preparation_summary
     tables["excluded_rows_detail"] = excluded_rows_detail
+    adapted = False
+
+    if not customer_analysis_available(tables):
+        tables["customer_summary"] = tables["customer_summary"].iloc[0:0].copy()
+        validation = tables["validation_report"].copy()
+        customer_checks = validation["check_name"].isin(
+            {
+                "customer_summary_revenue_equals_enriched_orders_final_revenue",
+                "customer_gross_revenue_equals_enriched_orders_gross_revenue",
+                "customer_units_equals_enriched_orders_units",
+            }
+        )
+        validation.loc[
+            customer_checks,
+            ["expected_value", "actual_value", "difference"],
+        ] = pd.NA
+        validation.loc[customer_checks, "status"] = "not_applicable"
+        tables["validation_report"] = validation
+        adapted = True
 
     if get_field_availability_status(tables, "returned") == "not_provided":
         quality = tables["post_conversion_data_quality"].copy()
@@ -500,7 +560,9 @@ def _adapt_generic_report_tables(
             tables["anomalies"] = anomalies.loc[
                 anomalies["anomaly_type"] != "return_rate_over_15_percent"
             ].copy()
+        adapted = True
 
+    if adapted:
         tables["report_status"] = make_report_status_table(
             tables["data_quality_report"],
             tables["post_conversion_data_quality"],
@@ -544,6 +606,27 @@ def _generic_markdown_sections(
         )
     else:
         lines.append("- Return Analysis: Available.")
+
+    customer_status = get_field_availability_status(
+        {"field_availability": availability_table}, "customer_id"
+    )
+    lines.extend(["", "## Customer Analysis"])
+    if customer_status == "not_provided":
+        lines.extend(
+            [
+                "- Customer Analysis: Not Available.",
+                f"- {CUSTOMER_NOT_PROVIDED_MESSAGE}",
+            ]
+        )
+    elif customer_status == "partially_provided":
+        lines.extend(
+            [
+                "- Customer Analysis: Not Available.",
+                f"- {CUSTOMER_PARTIALLY_PROVIDED_MESSAGE}",
+            ]
+        )
+    else:
+        lines.append("- Customer Analysis: Available.")
     return "\n".join(lines)
 
 
@@ -561,6 +644,11 @@ def _append_transparency_sheets(excel_path, report_tables):
         mode="a",
         if_sheet_exists="replace",
     ) as writer:
+        if (
+            not customer_analysis_available(report_tables)
+            and "customer_summary" in writer.book.sheetnames
+        ):
+            writer.book.remove(writer.book["customer_summary"])
         for table_name, sheet_name in (
             ("data_preparation_summary", "data_preparation_summary"),
             ("field_availability", "field_availability"),
@@ -643,7 +731,14 @@ def generate_generic_report(
         expenses_path = temp_dir / "expenses.csv"
         excel_path = temp_dir / "sales_report.xlsx"
         summary_path = temp_dir / "summary.md"
-        preflight.calculation_orders.to_csv(orders_path, index=False)
+        pipeline_orders = preflight.calculation_orders.copy(deep=False)
+        if "customer_id" not in pipeline_orders.columns:
+            pipeline_orders = pipeline_orders.assign(
+                customer_id=pd.Series(
+                    pd.NA, index=pipeline_orders.index, dtype="string"
+                )
+            )
+        pipeline_orders.to_csv(orders_path, index=False)
         pipeline_expenses_path = expenses_path
         if expenses_source is not None:
             expenses_path.write_bytes(_read_source_bytes(expenses_source))

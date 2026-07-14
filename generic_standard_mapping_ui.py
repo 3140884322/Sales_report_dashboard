@@ -29,8 +29,6 @@ STRATEGY_LABELS = {
     "unmapped": "Not mapped",
     "default_zero": "Default 0 (explicit business assumption)",
     "not_provided": "Data not provided (keep as unknown)",
-    "temporary_row_id": "Generate temporary row-level customer ID",
-    "temporary_order_id": "Generate temporary order-level customer ID",
     "omit": "Omit optional field",
 }
 
@@ -84,16 +82,14 @@ def _choice_options(field, source_columns):
     special = {
         "discount_rate": ("unmapped", "default_zero"),
         "returned": ("unmapped", "not_provided"),
-        "customer_id": (
-            "unmapped",
-            "temporary_order_id",
-            "temporary_row_id",
-        ),
+        "customer_id": ("not_provided", "omit"),
     }
-    if field in OPTIONAL_STANDARD_FIELDS:
+    if field in special:
+        strategies = special[field]
+    elif field in OPTIONAL_STANDARD_FIELDS:
         strategies = ("omit",)
     else:
-        strategies = special.get(field, ("unmapped",))
+        strategies = ("unmapped",)
     return [f"strategy::{strategy}" for strategy in strategies] + [
         f"source::{column}" for column in source_columns
     ]

@@ -445,7 +445,10 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
         "Build Approved Join Plan",
         icon=":material/account_tree:",
         key="generic_build_approved_plan",
-        disabled=not fact_table_id or approved_count == 0,
+        disabled=(
+            not fact_table_id
+            or (approved_count == 0 and len(discovery_result.tables) > 1)
+        ),
     )
     if build_clicked:
         try:

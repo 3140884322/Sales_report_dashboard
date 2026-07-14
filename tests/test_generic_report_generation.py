@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -22,8 +23,12 @@ from confirmed_relationship_plan import (
 )
 from generic_relationship_state import clear_generic_report_if_inputs_changed
 from generic_report_generation import (
+    CUSTOMER_NOT_PROVIDED_MESSAGE,
+    CUSTOMER_PARTIALLY_PROVIDED_MESSAGE,
     INVALID_DATE_ACTION_EXCLUDE_MONTHLY,
     build_data_preparation_summary,
+    customer_analysis_available,
+    customer_analysis_unavailable_message,
     generate_generic_report,
     return_analysis_available,
     run_generic_report_preflight,
@@ -39,6 +44,46 @@ from standard_field_mapping import (
 
 
 DATASET_DIR = PROJECT_DIR / "Global+Electronics+Retailer"
+
+
+def named_csv(name, text):
+    source = BytesIO(text.encode("utf-8"))
+    source.name = name
+    return source
+
+
+def pizza_original_csv_sources():
+    return [
+        named_csv(
+            "orders.csv",
+            "order_id,date,time\n"
+            "1,2015-01-01,11:38:36\n"
+            "2,2015-01-01,11:57:40\n"
+            "3,2015-01-01,12:12:28\n",
+        ),
+        named_csv(
+            "order_details.csv",
+            "order_details_id,order_id,pizza_id,quantity\n"
+            "1,1,bbq_ckn_l,1\n"
+            "2,1,cali_ckn_m,1\n"
+            "3,2,bbq_ckn_l,2\n"
+            "4,3,thai_ckn_l,1\n",
+        ),
+        named_csv(
+            "pizzas.csv",
+            "pizza_id,pizza_type_id,size,price\n"
+            "bbq_ckn_l,bbq_ckn,L,20.75\n"
+            "cali_ckn_m,cali_ckn,M,16.75\n"
+            "thai_ckn_l,thai_ckn,L,20.75\n",
+        ),
+        named_csv(
+            "pizza_types.csv",
+            "pizza_type_id,name,category,ingredients\n"
+            'bbq_ckn,The Barbecue Chicken Pizza,Chicken,"Chicken, Barbecue Sauce"\n'
+            'cali_ckn,The California Chicken Pizza,Chicken,"Chicken, Artichoke"\n'
+            'thai_ckn,The Thai Chicken Pizza,Chicken,"Chicken, Pineapple"\n',
+        ),
+    ]
 
 
 def base_source_frame():
@@ -257,6 +302,352 @@ class SmallGenericReportTests(unittest.TestCase):
         self.assertNotIn("generic_report_result", state)
 
 
+class PizzaGenericReportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.pizza = pd.DataFrame(
+            {
+                "Order ID": ["P-1", "P-1", "P-2", "P-3"],
+                "Order Date": [
+                    "2024-01-05",
+                    "2024-01-05",
+                    "2024-02-10",
+                    "2024-03-12",
+                ],
+                "Product ID": ["MARG", "COLA", "PEPP", "VEG"],
+                "Unit Price": [12.0, 3.0, 15.0, 14.0],
+                "Quantity": [1, 2, 1, 3],
+                "Product Name": [
+                    "Margherita",
+                    "Cola",
+                    "Pepperoni",
+                    "Vegetarian",
+                ],
+                "Category": ["Pizza", "Drink", "Pizza", "Pizza"],
+            }
+        )
+        cls.discovery = discover_relationships({"Pizza Orders": cls.pizza})
+        cls.plan = build_approved_join_plan(cls.discovery, "Pizza Orders", [])
+        cls.merge_result = execute_approved_join_plan(cls.discovery, cls.plan)
+        recommendations = recommend_standard_field_mappings(
+            cls.merge_result.merged_frame
+        )
+        selections = selections_from_recommendations(
+            recommendations, confirmed=True
+        )
+        cls.mapping = generate_unified_orders(
+            cls.merge_result.merged_frame, selections
+        )
+        cls.preflight = run_generic_report_preflight(
+            cls.mapping,
+            original_fact_row_count=cls.merge_result.fact_row_count,
+            merged_row_count=cls.merge_result.final_row_count,
+        )
+        cls.report = generate_generic_report(
+            mapping_result=cls.mapping,
+            preflight=cls.preflight,
+            discovery_result=cls.discovery,
+            plan=cls.plan,
+            decisions={},
+        )
+
+    def test_pizza_report_succeeds_without_temporary_customer_id(self):
+        self.assertTrue(self.mapping.success, self.mapping.errors)
+        self.assertTrue(self.mapping.unified_orders["customer_id"].isna().all())
+        self.assertFalse(
+            self.mapping.unified_orders["customer_id"]
+            .astype("string")
+            .str.startswith("TEMP-", na=False)
+            .any()
+        )
+        self.assertTrue(self.preflight.can_generate)
+        self.assertIn(self.report["status"], {"ready", "review_required"})
+        self.assertEqual(len(self.report["report_tables"]["enriched_orders"]), 4)
+
+    def test_pizza_keeps_sales_product_and_category_analysis(self):
+        tables = self.report["report_tables"]
+
+        self.assertFalse(tables["monthly_summary"].empty)
+        self.assertFalse(tables["category_summary"].empty)
+        self.assertFalse(tables["top_products"].empty)
+        self.assertEqual(tables["enriched_orders"]["order_id"].nunique(), 3)
+        self.assertEqual(tables["enriched_orders"]["quantity"].sum(), 7)
+
+    def test_pizza_skips_customer_analysis_and_top_customer_claim(self):
+        tables = self.report["report_tables"]
+        summary = self.report["summary_text"]
+
+        self.assertFalse(customer_analysis_available(tables))
+        self.assertTrue(tables["customer_summary"].empty)
+        self.assertIn(CUSTOMER_NOT_PROVIDED_MESSAGE, summary)
+        self.assertNotIn("highest-revenue customer", summary)
+        self.assertNotIn("Top Customer", summary)
+        customer_checks = tables["validation_report"][
+            tables["validation_report"]["check_name"].str.startswith("customer")
+        ]
+        self.assertFalse(customer_checks.empty)
+        self.assertTrue(customer_checks["status"].eq("not_applicable").all())
+
+    def test_pizza_excel_records_customer_unavailable_without_summary_sheet(self):
+        workbook = load_workbook(BytesIO(self.report["excel_bytes"]), read_only=True)
+        try:
+            self.assertNotIn("customer_summary", workbook.sheetnames)
+            availability = pd.read_excel(
+                BytesIO(self.report["excel_bytes"]),
+                sheet_name="field_availability",
+            )
+            customer = availability.loc[
+                availability["field_name"] == "customer_id"
+            ].iloc[0]
+            self.assertEqual(customer["availability_status"], "not_provided")
+            self.assertIn("Customer analysis", customer["notes"])
+        finally:
+            workbook.close()
+
+
+class PartialCustomerAvailabilityReportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = base_source_frame()
+        source["CustomerKey"] = pd.Series(
+            ["C-1", None, "   ", "C-4"], dtype="string"
+        )
+        recommendations = recommend_standard_field_mappings(source)
+        cls.mapping = generate_unified_orders(
+            source,
+            selections_from_recommendations(recommendations, confirmed=True),
+        )
+        cls.preflight = run_generic_report_preflight(cls.mapping)
+        cls.report = generate_generic_report(
+            mapping_result=cls.mapping,
+            preflight=cls.preflight,
+            discovery_result=None,
+            plan=empty_plan(),
+            decisions={},
+        )
+
+    def test_partial_customer_message_and_counts_are_recorded(self):
+        availability = self.report["field_availability"]
+        customer = availability.loc[
+            availability["field_name"] == "customer_id"
+        ].iloc[0]
+
+        self.assertEqual(customer["availability_status"], "partially_provided")
+        self.assertEqual(int(customer["provided_row_count"]), 2)
+        self.assertEqual(int(customer["total_row_count"]), 4)
+        self.assertIn(
+            CUSTOMER_PARTIALLY_PROVIDED_MESSAGE,
+            self.preflight.warnings,
+        )
+        self.assertIn(CUSTOMER_PARTIALLY_PROVIDED_MESSAGE, self.report["summary_text"])
+        self.assertIn("2 / 4 valid rows", self.report["summary_text"])
+        self.assertEqual(
+            customer_analysis_unavailable_message(self.report["report_tables"]),
+            CUSTOMER_PARTIALLY_PROVIDED_MESSAGE,
+        )
+        self.assertNotEqual(self.report["status"], "failed")
+
+        excel_availability = pd.read_excel(
+            BytesIO(self.report["excel_bytes"]),
+            sheet_name="field_availability",
+        )
+        excel_customer = excel_availability.loc[
+            excel_availability["field_name"] == "customer_id"
+        ].iloc[0]
+        self.assertEqual(int(excel_customer["provided_row_count"]), 2)
+        self.assertEqual(int(excel_customer["total_row_count"]), 4)
+
+
+class PizzaFourCsvEndToEndTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.discovery = discover_relationships(
+            read_tabular_sources(pizza_original_csv_sources())
+        )
+        expected = {
+            ("order_details", ("order_id",), "orders", ("order_id",)),
+            ("order_details", ("pizza_id",), "pizzas", ("pizza_id",)),
+            ("pizzas", ("pizza_type_id",), "pizza_types", ("pizza_type_id",)),
+        }
+        selected = []
+        for candidate in cls.discovery.relationships:
+            identity = (
+                candidate.left_table,
+                candidate.left_columns,
+                candidate.right_table,
+                candidate.right_columns,
+            )
+            if identity in expected:
+                selected.append(candidate)
+        cls.selected_relationships = selected
+        decisions = [approve_relationship(candidate) for candidate in selected]
+        cls.plan = build_approved_join_plan(
+            cls.discovery, "order_details", decisions
+        )
+        cls.merge_result = execute_approved_join_plan(cls.discovery, cls.plan)
+
+        merged = cls.merge_result.merged_frame
+        recommendations = recommend_standard_field_mappings(merged)
+        selections = list(
+            selections_from_recommendations(recommendations, confirmed=True)
+        )
+        explicit_sources = {
+            "product_id": "pizza_id",
+            "unit_price": "pizzas.price",
+        }
+        selections = [
+            replace(
+                selection,
+                strategy="source",
+                source_column=explicit_sources[selection.standard_field],
+                confirmed=True,
+            )
+            if selection.standard_field in explicit_sources
+            else selection
+            for selection in selections
+        ]
+        cls.mapping = generate_unified_orders(merged, selections)
+        cls.preflight = run_generic_report_preflight(
+            cls.mapping,
+            original_fact_row_count=cls.merge_result.fact_row_count,
+            merged_row_count=cls.merge_result.final_row_count,
+        )
+        cls.report = generate_generic_report(
+            mapping_result=cls.mapping,
+            preflight=cls.preflight,
+            discovery_result=cls.discovery,
+            plan=cls.plan,
+            decisions={
+                decision.original_candidate_id: decision for decision in decisions
+            },
+        )
+
+    def test_four_original_csvs_complete_generic_flow(self):
+        self.assertEqual(len(self.discovery.tables), 4)
+        self.assertEqual(len(self.selected_relationships), 3)
+        self.assertEqual(len(self.plan.steps), 3)
+        self.assertTrue(self.merge_result.success)
+        self.assertEqual(self.merge_result.fact_row_count, 4)
+        self.assertEqual(self.merge_result.final_row_count, 4)
+        self.assertTrue(self.mapping.success, self.mapping.errors)
+        self.assertTrue(self.preflight.can_generate)
+        self.assertIn(self.report["status"], {"ready", "review_required"})
+        self.assertEqual(len(self.report["report_tables"]["enriched_orders"]), 4)
+        customer = self.report["field_availability"].loc[
+            self.report["field_availability"]["field_name"] == "customer_id"
+        ].iloc[0]
+        self.assertEqual(customer["availability_status"], "not_provided")
+
+    def test_customer_conclusions_are_absent_from_all_report_outputs(self):
+        tables = self.report["report_tables"]
+        self.assertFalse(customer_analysis_available(tables))
+        self.assertTrue(tables["customer_summary"].empty)
+        self.assertNotIn("highest-revenue customer", self.report["summary_text"])
+        self.assertNotIn("Top Customer", self.report["summary_text"])
+
+        customer_checks = tables["validation_report"][
+            tables["validation_report"]["check_name"].str.startswith("customer")
+        ]
+        self.assertTrue(customer_checks["status"].eq("not_applicable").all())
+        self.assertTrue(customer_checks["actual_value"].isna().all())
+
+        workbook = load_workbook(BytesIO(self.report["excel_bytes"]), read_only=True)
+        try:
+            self.assertNotIn("customer_summary", workbook.sheetnames)
+            validation = pd.read_excel(
+                BytesIO(self.report["excel_bytes"]),
+                sheet_name="validation_report",
+            )
+            excel_customer_checks = validation[
+                validation["check_name"].str.startswith("customer")
+            ]
+            self.assertTrue(
+                excel_customer_checks["status"].eq("not_applicable").all()
+            )
+            self.assertTrue(excel_customer_checks["actual_value"].isna().all())
+        finally:
+            workbook.close()
+
+    def test_dashboard_kpis_charts_and_insights_skip_customer_conclusions(self):
+        import app as dashboard_app
+
+        metric_columns = []
+
+        def make_columns(count):
+            columns = [MagicMock() for _ in range(count)]
+            metric_columns.extend(columns)
+            return columns
+
+        with patch.object(dashboard_app, "st") as streamlit_mock:
+            streamlit_mock.columns.side_effect = make_columns
+            dashboard_app.show_kpi_cards(self.report["report_tables"])
+
+        metric_labels = [
+            call.args[0]
+            for column in metric_columns
+            for call in column.metric.call_args_list
+        ]
+        self.assertNotIn("Top Customer", metric_labels)
+
+        with (
+            patch.object(dashboard_app, "st") as streamlit_mock,
+            patch.object(dashboard_app, "show_monthly_revenue_trend"),
+            patch.object(dashboard_app, "show_revenue_by_category"),
+            patch.object(dashboard_app, "show_top_products_chart"),
+            patch.object(dashboard_app, "show_top_customers_chart") as customer_chart,
+            patch.object(dashboard_app, "show_anomalies_by_type_chart"),
+        ):
+            streamlit_mock.columns.side_effect = lambda count: [
+                MagicMock() for _ in range(count)
+            ]
+            dashboard_app.show_visual_dashboard(self.report)
+            customer_chart.assert_not_called()
+            info_messages = [
+                call.args[0] for call in streamlit_mock.info.call_args_list
+            ]
+            self.assertIn(CUSTOMER_NOT_PROVIDED_MESSAGE, info_messages)
+
+        with patch.object(dashboard_app, "st") as streamlit_mock:
+            dashboard_app.show_business_insights(self.report["report_tables"])
+            insight_text = "\n".join(
+                str(call.args[0]) for call in streamlit_mock.write.call_args_list
+            )
+            self.assertNotIn("Top customer", insight_text)
+
+        with (
+            patch.object(dashboard_app, "st"),
+            patch.object(dashboard_app, "show_table_expander") as expander,
+        ):
+            dashboard_app.show_detail_tables(self.report)
+            expander_titles = [call.args[0] for call in expander.call_args_list]
+            self.assertNotIn("Top Customers", expander_titles)
+
+
+class CustomerNameWithoutIdReportTests(unittest.TestCase):
+    def test_customer_name_does_not_enable_customer_analysis(self):
+        source = base_source_frame().drop(columns=["CustomerKey"])
+        source["Customer Name"] = ["Alice", "Bob", "Alice", "Carol"]
+        recommendations = recommend_standard_field_mappings(source)
+        mapping = generate_unified_orders(
+            source,
+            selections_from_recommendations(recommendations, confirmed=True),
+        )
+        preflight = run_generic_report_preflight(mapping)
+        report = generate_generic_report(
+            mapping_result=mapping,
+            preflight=preflight,
+            discovery_result=None,
+            plan=empty_plan(),
+            decisions={},
+        )
+
+        self.assertIn("customer_name", mapping.unified_orders.columns)
+        self.assertTrue(mapping.unified_orders["customer_id"].isna().all())
+        self.assertFalse(customer_analysis_available(report["report_tables"]))
+        self.assertTrue(report["report_tables"]["customer_summary"].empty)
+        self.assertNotIn("highest-revenue customer", report["summary_text"])
+
+
 class MavenGenericEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -327,6 +718,18 @@ class MavenGenericEndToEndTests(unittest.TestCase):
     def test_maven_enriched_orders_preserves_62884_rows(self):
         enriched = self.report["report_tables"]["enriched_orders"]
         self.assertEqual(len(enriched), 62884)
+
+    def test_maven_customer_analysis_remains_available(self):
+        tables = self.report["report_tables"]
+
+        self.assertTrue(customer_analysis_available(tables))
+        self.assertFalse(tables["customer_summary"].empty)
+        self.assertIn("highest-revenue customer", self.report["summary_text"])
+        workbook = load_workbook(BytesIO(self.report["excel_bytes"]), read_only=True)
+        try:
+            self.assertIn("customer_summary", workbook.sheetnames)
+        finally:
+            workbook.close()
 
     def test_confirmed_discount_default_enters_report(self):
         enriched = self.report["report_tables"]["enriched_orders"]
