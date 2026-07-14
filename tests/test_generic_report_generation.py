@@ -34,7 +34,6 @@ from generic_report_generation import (
     run_generic_report_preflight,
 )
 from generic_table_reader import read_tabular_sources
-from multi_table_loader import load_multi_table_dataset
 from relationship_discovery import discover_relationships
 from standard_field_mapping import (
     generate_unified_orders,
@@ -361,7 +360,7 @@ class PizzaGenericReportTests(unittest.TestCase):
             .any()
         )
         self.assertTrue(self.preflight.can_generate)
-        self.assertIn(self.report["status"], {"ready", "review_required"})
+        self.assertEqual(self.report["status"], "ready")
         self.assertEqual(len(self.report["report_tables"]["enriched_orders"]), 4)
 
     def test_pizza_keeps_sales_product_and_category_analysis(self):
@@ -531,7 +530,7 @@ class PizzaFourCsvEndToEndTests(unittest.TestCase):
         self.assertEqual(self.merge_result.final_row_count, 4)
         self.assertTrue(self.mapping.success, self.mapping.errors)
         self.assertTrue(self.preflight.can_generate)
-        self.assertIn(self.report["status"], {"ready", "review_required"})
+        self.assertEqual(self.report["status"], "ready")
         self.assertEqual(len(self.report["report_tables"]["enriched_orders"]), 4)
         customer = self.report["field_availability"].loc[
             self.report["field_availability"]["field_name"] == "customer_id"
@@ -719,15 +718,44 @@ class MavenGenericEndToEndTests(unittest.TestCase):
         enriched = self.report["report_tables"]["enriched_orders"]
         self.assertEqual(len(enriched), 62884)
 
+    def test_maven_generic_merge_uses_composite_rate_key_without_inflation(self):
+        exchange_step = next(
+            step for step in self.plan.steps if step.right_table == "Exchange_Rates"
+        )
+
+        self.assertEqual(
+            dict(zip(exchange_step.left_columns, exchange_step.right_columns)),
+            {"Currency Code": "Currency", "Order Date": "Date"},
+        )
+        self.assertEqual(len(exchange_step.left_columns), 2)
+        self.assertEqual(self.merge_result.fact_row_count, 62884)
+        self.assertEqual(self.merge_result.final_row_count, 62884)
+        self.assertTrue(
+            all(item.row_growth == 0 for item in self.merge_result.diagnostics)
+        )
+
     def test_maven_customer_analysis_remains_available(self):
         tables = self.report["report_tables"]
 
         self.assertTrue(customer_analysis_available(tables))
-        self.assertFalse(tables["customer_summary"].empty)
+        self.assertEqual(len(tables["customer_summary"]), 11887)
         self.assertIn("highest-revenue customer", self.report["summary_text"])
         workbook = load_workbook(BytesIO(self.report["excel_bytes"]), read_only=True)
         try:
             self.assertIn("customer_summary", workbook.sheetnames)
+        finally:
+            workbook.close()
+
+    def test_maven_generic_excel_and_markdown_are_available(self):
+        self.assertGreater(len(self.report["excel_bytes"]), 100_000)
+        self.assertTrue(
+            self.report["summary_text"].startswith("# Sales Reporting Summary")
+        )
+        workbook = load_workbook(BytesIO(self.report["excel_bytes"]), read_only=True)
+        try:
+            self.assertIn("enriched_orders", workbook.sheetnames)
+            self.assertIn("customer_summary", workbook.sheetnames)
+            self.assertIn("data_preparation_summary", workbook.sheetnames)
         finally:
             workbook.close()
 
@@ -770,17 +798,6 @@ class MavenGenericEndToEndTests(unittest.TestCase):
         self.assertEqual(len(approved_rows), 4)
         self.assertGreaterEqual(len(rejected_rows), 1)
         self.assertEqual(int(final_rows), 62884)
-
-    def test_maven_multi_table_mode_still_loads(self):
-        result = load_multi_table_dataset(
-            DATASET_DIR / "Sales.csv",
-            DATASET_DIR / "Products.csv",
-            DATASET_DIR / "Customers.csv",
-            DATASET_DIR / "Stores.csv",
-            DATASET_DIR / "Exchange_Rates.csv",
-        )
-        self.assertEqual(len(result["unified_orders"]), 62884)
-
 
 class ExistingModeCompatibilityTests(unittest.TestCase):
     def test_single_table_pipeline_still_generates_report(self):

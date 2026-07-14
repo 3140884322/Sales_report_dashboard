@@ -11,6 +11,23 @@ summary.
 The project is designed as a GitHub-ready starter project for AI-assisted sales
 reporting automation.
 
+## Application Modes
+
+The Streamlit app provides two data import modes:
+
+1. **Single Table Mode**
+   Upload one table that already contains the sales transaction fields.
+
+2. **Multi-Table Dataset Mode**
+   Upload multiple related sales, order, product, customer, store, or other
+   business tables. The system will help identify their relationships and
+   safely combine them.
+
+Multi-Table Dataset Mode discovers candidate relationships and waits for the
+user to approve, edit, or reject them. It then validates a confirmed join plan,
+performs safe many-to-one merges, maps standard fields, runs report preflight,
+and generates the existing dashboard, Excel, and Markdown outputs.
+
 ## Input Files
 
 Default input files:
@@ -54,6 +71,11 @@ Orders file:
 - `quantity`
 - `discount_rate`
 - `returned`
+
+In Multi-Table Dataset Mode, `customer_id` is optional. When it is unavailable
+or only partially provided, customer analysis is skipped without generating a
+temporary customer identifier. Single Table Mode keeps its existing required
+column behavior.
 
 Optional order columns:
 

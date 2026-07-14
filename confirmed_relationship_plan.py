@@ -362,6 +362,8 @@ def execute_approved_join_plan(
             step.comparison_kinds,
             profile_by_id[step.left_table_id].role_guess,
             profile_by_id[step.right_table_id].role_guess,
+            profile_by_id[step.left_table_id].entity_role,
+            profile_by_id[step.right_table_id].entity_role,
         )
         if safety.blocked or safety.right_key_uniqueness < 1.0:
             message = " ".join(safety.block_reasons) or "Right key is not unique."

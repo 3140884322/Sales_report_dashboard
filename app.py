@@ -1,5 +1,4 @@
 import json
-import hashlib
 import traceback
 from io import BytesIO
 from pathlib import Path
@@ -10,11 +9,6 @@ import plotly.express as px
 import streamlit as st
 
 from analysis import REQUIRED_COLUMNS, run_pipeline
-from multi_table_loader import (
-    MultiTableLoaderError,
-    load_multi_table_dataset,
-    read_csv_with_encoding_fallback,
-)
 from generic_relationship_ui import render_generic_relationship_mode
 from generic_report_generation import (
     customer_analysis_available,
@@ -56,98 +50,6 @@ def save_uploaded_file(uploaded_file, output_path):
 def read_uploaded_csv(uploaded_file):
     """Read an uploaded CSV file into a DataFrame."""
     return pd.read_csv(BytesIO(uploaded_file.getvalue()))
-
-
-def get_uploaded_file_signature(uploaded_file):
-    """Return a stable signature for one uploaded file."""
-    if uploaded_file is None:
-        return None
-
-    file_bytes = uploaded_file.getvalue()
-
-    return {
-        "name": getattr(uploaded_file, "name", "uploaded_file"),
-        "size": len(file_bytes),
-        "md5": hashlib.md5(file_bytes).hexdigest(),
-    }
-
-
-def make_multi_table_upload_signature(uploaded_files):
-    """Return a signature for the current multi-table upload set."""
-    return {
-        table_name: get_uploaded_file_signature(uploaded_file)
-        for table_name, uploaded_file in uploaded_files.items()
-    }
-
-
-def clear_multi_table_state_if_uploads_changed(upload_signature):
-    """Clear prepared multi-table state when source uploads change."""
-    previous_signature = st.session_state.get("multi_table_upload_signature")
-
-    if previous_signature != upload_signature:
-        st.session_state["multi_table_upload_signature"] = upload_signature
-        st.session_state.pop("multi_table_result", None)
-        st.session_state.pop("report_result", None)
-
-
-def read_uploaded_table_summary(uploaded_file, table_name):
-    """Read one uploaded table for the file summary and preview area."""
-    frame, metadata = read_csv_with_encoding_fallback(uploaded_file, table_name)
-
-    return {
-        "metadata": metadata,
-        "preview": frame.head(5),
-    }
-
-
-def get_cached_uploaded_table_summary(uploaded_file, table_name):
-    """Cache uploaded table previews so reruns do not repeatedly parse files."""
-    if uploaded_file is None:
-        return None
-
-    cache_key = f"table_preview_{table_name}"
-    signature = get_uploaded_file_signature(uploaded_file)
-    cached = st.session_state.get(cache_key)
-
-    if cached and cached["signature"] == signature:
-        return cached["summary"]
-
-    summary = read_uploaded_table_summary(uploaded_file, table_name)
-    st.session_state[cache_key] = {
-        "signature": signature,
-        "summary": summary,
-    }
-
-    return summary
-
-
-def show_uploaded_table_summary(uploaded_file, table_name):
-    """Show file name, shape, columns, and preview for one uploaded CSV."""
-    if uploaded_file is None:
-        return
-
-    try:
-        summary = get_cached_uploaded_table_summary(uploaded_file, table_name)
-    except Exception as error:
-        st.error(f"Could not read {table_name}: {error}")
-        with st.expander(f"{table_name} error details"):
-            st.code(traceback.format_exc())
-        return
-
-    metadata = summary["metadata"]
-
-    with st.expander(f"{table_name}: {metadata['file_name']}", expanded=False):
-        st.write(f"Rows: {metadata['row_count']:,}")
-        st.write(f"Columns: {metadata['column_count']:,}")
-        st.write(f"Encoding: {metadata['encoding']}")
-        st.write("Column names:")
-        st.dataframe(
-            pd.DataFrame({"column": metadata["columns"]}),
-            hide_index=True,
-            use_container_width=True,
-        )
-        st.write("Preview:")
-        st.dataframe(summary["preview"], hide_index=True, use_container_width=True)
 
 
 def save_orders_file(uploaded_file, output_path, source_rows_to_remove=None):
@@ -587,6 +489,9 @@ def show_monthly_revenue_trend(report_tables):
         "units": ":,",
         "AOV": ":$,.2f",
     }
+    if "is_partial_period" in monthly.columns:
+        hover_data["is_partial_period"] = True
+        hover_data["partial_reason"] = True
     if return_analysis_available(report_tables):
         hover_data["return_rate"] = ":.1%"
 
@@ -739,15 +644,18 @@ def show_anomalies_by_type_chart(report_tables):
         st.info("No anomalies detected.")
         return
 
+    label_column = (
+        "anomaly_label" if "anomaly_label" in anomalies.columns else "anomaly_type"
+    )
     anomaly_counts = (
-        anomalies.groupby("anomaly_type")
+        anomalies.groupby(label_column)
         .size()
         .reset_index(name="count")
         .sort_values("count", ascending=False)
     )
     fig = px.bar(
         anomaly_counts,
-        x="anomaly_type",
+        x=label_column,
         y="count",
         title="Anomalies by Type",
         hover_data={"count": ":,"},
@@ -929,7 +837,7 @@ def show_what_happened(report_result):
 
 
 def make_action_required_table(report_result):
-    """Create dashboard action rows based on report status and warnings."""
+    """Create business and data-quality issues that require review."""
     rows = []
     report_tables = report_result["report_tables"]
     anomalies = report_tables["anomalies"]
@@ -959,43 +867,15 @@ def make_action_required_table(report_result):
             }
         )
 
-    if not report_result["expenses_uploaded"]:
-        rows.append(
-            {
-                "Issue": "Missing expense file",
-                "Severity": "Info",
-                "Business Impact": "Cash flow analysis was skipped.",
-                "Suggested Action": "Upload expenses.csv if cash flow reporting is needed.",
-            }
-        )
-
-    if not return_analysis_available(report_tables):
-        rows.append(
-            {
-                "Issue": "Return data unavailable",
-                "Severity": "Info",
-                "Business Impact": "Return rates and return anomalies were not calculated.",
-                "Suggested Action": "Provide a returned field if return analysis is required.",
-            }
-        )
-
-    if not customer_analysis_available(report_tables):
-        rows.append(
-            {
-                "Issue": "Customer data unavailable",
-                "Severity": "Info",
-                "Business Impact": "Customer rankings and lifecycle analysis were skipped.",
-                "Suggested Action": "Provide customer_id if customer analysis is required.",
-            }
-        )
-
     if not anomalies.empty:
-        for anomaly_type, count in anomalies["anomaly_type"].value_counts().items():
+        for _, anomaly in anomalies.iterrows():
             rows.append(
                 {
-                    "Issue": anomaly_type,
+                    "Issue": anomaly.get(
+                        "anomaly_label", anomaly["anomaly_type"]
+                    ),
                     "Severity": "Warning",
-                    "Business Impact": f"{count} anomaly row(s) need review.",
+                    "Business Impact": anomaly["details"],
                     "Suggested Action": (
                         "Open the Anomalies detail table and investigate the "
                         "affected rows."
@@ -1009,15 +889,56 @@ def make_action_required_table(report_result):
     )
 
 
+def make_data_limitations_table(report_result):
+    """Create optional-data limitations that do not imply a business problem."""
+    rows = []
+    report_tables = report_result["report_tables"]
+    if not report_result["expenses_uploaded"]:
+        rows.append(
+            {
+                "Limitation": "Expense data was not provided",
+                "Impact": "Finance and cash-flow analysis was skipped.",
+            }
+        )
+    if not return_analysis_available(report_tables):
+        rows.append(
+            {
+                "Limitation": "Return data was not provided",
+                "Impact": "Return rates and return anomalies were skipped.",
+            }
+        )
+    if not customer_analysis_available(report_tables):
+        rows.append(
+            {
+                "Limitation": customer_analysis_unavailable_message(report_tables),
+                "Impact": "Customer rankings and lifecycle analysis were skipped.",
+            }
+        )
+    rows.append(
+        {
+            "Limitation": "Cost data was not provided",
+            "Impact": "Gross-margin analysis is not available.",
+        }
+    )
+    return pd.DataFrame(rows, columns=["Limitation", "Impact"])
+
+
 def show_action_required(report_result):
-    """Show required actions as a compact table."""
-    st.subheader("Action Required")
+    """Separate business issues from optional-data limitations."""
+    st.subheader("Business Issues Requiring Review")
     action_table = make_action_required_table(report_result)
 
     if action_table.empty:
-        st.success("No action required.")
+        st.success("No business issues require review.")
     else:
         st.dataframe(action_table, hide_index=True, use_container_width=True)
+
+    st.subheader("Data Availability and Limitations")
+    limitations = make_data_limitations_table(report_result)
+    if limitations.empty:
+        st.success("No material data limitations were identified.")
+    else:
+        st.dataframe(limitations, hide_index=True, use_container_width=True)
 
 
 def show_business_insights(report_tables):
@@ -1034,20 +955,42 @@ def show_business_insights(report_tables):
         st.write("- Monthly insight was not generated.")
         return
 
-    strongest_month = monthly.loc[monthly["revenue"].idxmax()]
-    weakest_month = monthly.loc[monthly["revenue"].idxmin()]
+    complete_months = (
+        monthly.loc[~monthly["is_partial_period"].fillna(False)]
+        if "is_partial_period" in monthly.columns
+        else monthly
+    )
+    strongest_month = (
+        complete_months.loc[complete_months["revenue"].idxmax()]
+        if not complete_months.empty
+        else None
+    )
+    weakest_month = (
+        complete_months.loc[complete_months["revenue"].idxmin()]
+        if not complete_months.empty
+        else None
+    )
     top_category = categories.iloc[0] if not categories.empty else None
     top_product = products.iloc[0] if not products.empty else None
     top_customer = customers.iloc[0] if not customers.empty else None
 
-    st.write(
-        f"- Strongest month: {strongest_month['year_month']} "
-        f"with {format_money(strongest_month['revenue'])} in revenue."
-    )
-    st.write(
-        f"- Weakest month: {weakest_month['year_month']} "
-        f"with {format_money(weakest_month['revenue'])} in revenue."
-    )
+    if strongest_month is not None:
+        st.write(
+            f"- Strongest complete month: {strongest_month['year_month']} "
+            f"with {format_money(strongest_month['revenue'])} in revenue."
+        )
+        st.write(
+            f"- Weakest complete month: {weakest_month['year_month']} "
+            f"with {format_money(weakest_month['revenue'])} in revenue."
+        )
+    else:
+        st.write("- No complete calendar month was available for ranking.")
+
+    if "is_partial_period" in monthly.columns:
+        for reason in monthly.loc[
+            monthly["is_partial_period"].fillna(False), "partial_reason"
+        ]:
+            st.write(f"- {reason}.")
 
     if top_category is not None:
         st.write(
@@ -1103,7 +1046,10 @@ def show_detail_tables(report_result):
         "Duplicate Rows Detail",
         report_result["duplicate_rows_detail"],
     )
-    show_table_expander("Anomalies", report_tables["anomalies"])
+    anomaly_display = report_tables["anomalies"].drop(
+        columns=["anomaly_type"], errors="ignore"
+    )
+    show_table_expander("Anomalies", anomaly_display)
     show_table_expander("Validation Report", report_tables["validation_report"])
     show_table_expander("Data Quality Checks", data_quality_checks)
     if "data_preparation_summary" in report_tables:
@@ -1229,45 +1175,6 @@ def generate_report(
         }
 
 
-def generate_report_from_unified_orders(unified_orders, expenses_file=None):
-    """Generate a report by passing a prepared orders table into run_pipeline."""
-    with TemporaryDirectory() as temp_dir_name:
-        temp_dir = Path(temp_dir_name)
-        orders_path = temp_dir / "orders.csv"
-        expenses_path = temp_dir / "expenses.csv"
-        excel_path = temp_dir / "sales_report.xlsx"
-        summary_path = temp_dir / "summary.md"
-
-        unified_orders.to_csv(orders_path, index=False)
-
-        if expenses_file is not None:
-            save_uploaded_file(expenses_file, expenses_path)
-
-        report_tables, excel_output, summary_output = run_pipeline(
-            csv_path=orders_path,
-            expenses_path=expenses_path,
-            excel_path=excel_path,
-            summary_path=summary_path,
-        )
-
-        status, reason = get_status_message(report_tables["report_status"])
-
-        return {
-            "status": status,
-            "reason": reason,
-            "expenses_uploaded": expenses_file is not None,
-            "report_tables": report_tables,
-            "original_row_count": len(unified_orders),
-            "calculation_row_count": len(unified_orders),
-            "removed_row_count": 0,
-            "duplicate_group_count": 0,
-            "duplicate_row_count": 0,
-            "duplicate_rows_detail": pd.DataFrame(),
-            "excel_bytes": excel_output.read_bytes(),
-            "summary_text": summary_output.read_text(encoding="utf-8"),
-        }
-
-
 def show_report_dashboard(report_result):
     """Show the generated report dashboard and downloads."""
     st.divider()
@@ -1348,103 +1255,6 @@ def show_report_dashboard(report_result):
             file_name="summary.md",
             mime="text/markdown",
         )
-
-
-def format_merge_summary_for_display(merge_summary):
-    """Create a compact merge summary for the Streamlit review table."""
-    if merge_summary.empty:
-        return merge_summary
-
-    display = merge_summary[
-        [
-            "right_table",
-            "before_row_count",
-            "after_row_count",
-            "unmatched_count",
-            "match_rate",
-            "row_inflation",
-        ]
-    ].copy()
-    display = display.rename(
-        columns={
-            "before_row_count": "before",
-            "after_row_count": "after",
-            "unmatched_count": "unmatched",
-        }
-    )
-    display["match_rate"] = display["match_rate"].apply(
-        lambda value: "N/A" if pd.isna(value) else f"{value:.2%}"
-    )
-
-    return display
-
-
-def multi_table_has_blocking_issues(multi_table_result):
-    """Return True when prepared multi-table data should not generate a report."""
-    merge_summary = multi_table_result["merge_summary"]
-    quality_warnings = multi_table_result["quality_warnings"]
-
-    if not merge_summary.empty and merge_summary["row_inflation"].fillna(False).any():
-        return True
-
-    if quality_warnings.empty:
-        return False
-
-    blocking_severities = {"error", "critical"}
-
-    return quality_warnings["severity"].str.lower().isin(blocking_severities).any()
-
-
-def show_multi_table_prepare_result(multi_table_result):
-    """Show merge diagnostics and unified orders preview for multi-table mode."""
-    source_summary = multi_table_result["source_table_summary"]
-    merge_summary = multi_table_result["merge_summary"]
-    quality_warnings = multi_table_result["quality_warnings"]
-    unified_orders = multi_table_result["unified_orders"]
-
-    st.subheader("Step 3: Review Merge & Quality")
-
-    st.markdown("### Source Table Summary")
-    st.dataframe(
-        source_summary[["table_name", "row_count", "column_count"]],
-        hide_index=True,
-        use_container_width=True,
-    )
-
-    st.markdown("### Merge Summary")
-    merge_display = format_merge_summary_for_display(merge_summary)
-    st.dataframe(merge_display, hide_index=True, use_container_width=True)
-
-    if not merge_summary.empty and merge_summary["row_inflation"].fillna(False).any():
-        st.error("Row inflation was detected. Report generation is blocked.")
-
-    st.markdown("### Data Quality Warnings")
-
-    if quality_warnings.empty:
-        st.success("No multi-table data quality warnings were found.")
-    else:
-        if multi_table_has_blocking_issues(multi_table_result):
-            st.error("Blocking data quality issues were found.")
-        else:
-            st.warning("Data quality warnings were found. Review them before using the report.")
-
-        st.dataframe(quality_warnings, hide_index=True, use_container_width=True)
-
-    st.markdown("### Unified Orders Preview")
-    st.write(f"Final unified order rows: {len(unified_orders):,}")
-    st.dataframe(
-        unified_orders.head(20),
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
-def show_multi_table_upload_summaries(uploaded_files):
-    """Show summaries and previews for uploaded multi-table CSV files."""
-    st.markdown("#### Uploaded Table Previews")
-
-    for table_name, uploaded_file in uploaded_files.items():
-        show_uploaded_table_summary(uploaded_file, table_name)
 
 
 st.set_page_config(page_title="Sales Report Generator", layout="wide")
@@ -1680,156 +1490,27 @@ def render_single_table_mode():
         show_report_dashboard(report_result)
 
 
-def render_multi_table_mode():
-    """Render Maven-style multi-table upload, merge, and report flow."""
-    st.subheader("Step 1: Upload Tables")
-
-    sales_file = st.file_uploader(
-        "Sales.csv (required)",
-        type=["csv"],
-        key="multi_sales_file",
-    )
-    products_file = st.file_uploader(
-        "Products.csv (required)",
-        type=["csv"],
-        key="multi_products_file",
-    )
-    customers_file = st.file_uploader(
-        "Customers.csv (optional)",
-        type=["csv"],
-        key="multi_customers_file",
-    )
-    stores_file = st.file_uploader(
-        "Stores.csv (optional)",
-        type=["csv"],
-        key="multi_stores_file",
-    )
-    exchange_rates_file = st.file_uploader(
-        "Exchange_Rates.csv (optional)",
-        type=["csv"],
-        key="multi_exchange_rates_file",
-    )
-    expenses_file = st.file_uploader(
-        "expenses.csv (optional)",
-        type=["csv"],
-        key="multi_expenses_file",
-    )
-
-    uploaded_files = {
-        "Sales": sales_file,
-        "Products": products_file,
-        "Customers": customers_file,
-        "Stores": stores_file,
-        "Exchange_Rates": exchange_rates_file,
-    }
-    upload_signature = make_multi_table_upload_signature(uploaded_files)
-    clear_multi_table_state_if_uploads_changed(upload_signature)
-    expenses_signature = get_uploaded_file_signature(expenses_file)
-
-    if st.session_state.get("multi_expenses_signature") != expenses_signature:
-        st.session_state["multi_expenses_signature"] = expenses_signature
-        st.session_state.pop("report_result", None)
-
-    show_multi_table_upload_summaries(uploaded_files)
-
-    missing_required_files = []
-
-    if sales_file is None:
-        missing_required_files.append("Sales.csv")
-
-    if products_file is None:
-        missing_required_files.append("Products.csv")
-
-    if missing_required_files:
-        st.warning(
-            "Required file(s) missing: " + ", ".join(missing_required_files)
-        )
-
-    st.subheader("Step 2: Prepare Multi-table Dataset")
-    prepare_clicked = st.button(
-        "Prepare Multi-table Dataset",
-        key="prepare_multi_table_dataset",
-    )
-
-    if prepare_clicked:
-        st.session_state.pop("report_result", None)
-
-        if missing_required_files:
-            st.error(
-                "Cannot prepare dataset. Missing required file(s): "
-                + ", ".join(missing_required_files)
-            )
-        else:
-            try:
-                with st.spinner("Preparing multi-table dataset..."):
-                    st.session_state["multi_table_result"] = load_multi_table_dataset(
-                        sales_source=sales_file,
-                        products_source=products_file,
-                        customers_source=customers_file,
-                        stores_source=stores_file,
-                        exchange_rates_source=exchange_rates_file,
-                    )
-                st.success("Multi-table dataset prepared successfully.")
-            except MultiTableLoaderError as error:
-                st.session_state.pop("multi_table_result", None)
-                st.error(str(error))
-            except Exception as error:
-                st.session_state.pop("multi_table_result", None)
-                st.error(f"Could not prepare multi-table dataset: {error}")
-                with st.expander("Error details"):
-                    st.code(traceback.format_exc())
-
-    multi_table_result = st.session_state.get("multi_table_result")
-
-    if multi_table_result:
-        show_multi_table_prepare_result(multi_table_result)
-
-        blocking_issues = multi_table_has_blocking_issues(multi_table_result)
-
-        st.subheader("Step 4: Generate Report")
-
-        if blocking_issues:
-            st.error(
-                "Report generation is blocked until merge or data quality errors "
-                "are fixed."
-            )
-
-        generate_clicked = st.button(
-            "Generate Report",
-            key="multi_generate_report",
-            disabled=blocking_issues,
-        )
-
-        if generate_clicked:
-            st.session_state.pop("report_result", None)
-
-            try:
-                with st.spinner("Generating report..."):
-                    st.session_state["report_result"] = generate_report_from_unified_orders(
-                        multi_table_result["unified_orders"],
-                        expenses_file,
-                    )
-            except Exception as error:
-                st.error(f"Could not generate report: {error}")
-                with st.expander("Error details"):
-                    st.code(traceback.format_exc())
-
-    report_result = st.session_state.get("report_result")
-
-    if report_result:
-        show_report_dashboard(report_result)
-
-
 mode = st.radio(
     "Data Import Mode",
     [
         "Single Table Mode",
-        "Multi-table Dataset Mode",
-        "Generic Relationship Mode",
+        "Multi-Table Dataset Mode",
     ],
     index=0,
     horizontal=True,
 )
+
+mode_descriptions = {
+    "Single Table Mode": (
+        "Upload one table that already contains the sales transaction fields."
+    ),
+    "Multi-Table Dataset Mode": (
+        "Upload multiple related sales, order, product, customer, store, or other "
+        "business tables. The system will help identify their relationships and "
+        "safely combine them."
+    ),
+}
+st.caption(mode_descriptions[mode])
 
 if st.session_state.get("active_import_mode") != mode:
     st.session_state["active_import_mode"] = mode
@@ -1837,8 +1518,6 @@ if st.session_state.get("active_import_mode") != mode:
 
 if mode == "Single Table Mode":
     render_single_table_mode()
-elif mode == "Multi-table Dataset Mode":
-    render_multi_table_mode()
 else:
     generic_report_result = render_generic_relationship_mode()
     if generic_report_result is not None:

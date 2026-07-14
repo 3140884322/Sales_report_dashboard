@@ -13,6 +13,7 @@ from generic_report_ui import render_generic_report_generation
 from standard_field_mapping import (
     OPTIONAL_STANDARD_FIELDS,
     REQUIRED_STANDARD_FIELDS,
+    build_source_entity_role_map,
     evaluate_field_mapping_recommendation,
     generate_unified_orders,
     recommend_standard_field_mappings,
@@ -50,11 +51,12 @@ def _memory_text(memory_bytes):
     return f"{value:,.1f} GiB"
 
 
-def _mapping_signature(frame):
+def _mapping_signature(frame, source_entity_roles):
     return (
         frame.shape,
         tuple(map(str, frame.columns)),
         tuple(map(str, frame.dtypes)),
+        tuple(sorted(source_entity_roles.items())),
     )
 
 
@@ -164,13 +166,15 @@ def _render_size_guard(frame):
         )
 
 
-def _initialize_mapping_state(frame):
-    signature = _mapping_signature(frame)
+def _initialize_mapping_state(frame, source_entity_roles):
+    signature = _mapping_signature(frame, source_entity_roles)
     if st.session_state.get("generic_mapping_signature") == signature:
         return
 
     invalidate_generic_mapping_state(st.session_state)
-    recommendations = recommend_standard_field_mappings(frame)
+    recommendations = recommend_standard_field_mappings(
+        frame, source_entity_roles
+    )
     st.session_state["generic_mapping_signature"] = signature
     st.session_state["generic_mapping_recommendations"] = recommendations
     for recommendation in recommendations:
@@ -184,7 +188,7 @@ def _initialize_mapping_state(frame):
     st.session_state["generic_mapping_extensions"] = []
 
 
-def _render_field_choices(frame, recommendations):
+def _render_field_choices(frame, recommendations, source_entity_roles):
     source_columns = list(map(str, frame.columns))
     selections = []
     inference_records = []
@@ -239,7 +243,10 @@ def _render_field_choices(frame, recommendations):
 
             if strategy == "source":
                 inference = evaluate_field_mapping_recommendation(
-                    frame, field, source_column
+                    frame,
+                    field,
+                    source_column,
+                    source_entity_roles,
                 )
                 confidence = inference.confidence_score
                 explanation = inference.explanation
@@ -300,7 +307,10 @@ def render_generic_standard_mapping(
 
     st.subheader("Step 6: Standard Field Mapping")
     _render_size_guard(frame)
-    _initialize_mapping_state(frame)
+    source_entity_roles = build_source_entity_role_map(
+        discovery_result, merge_result.fact_table_id
+    )
+    _initialize_mapping_state(frame, source_entity_roles)
     recommendations = st.session_state["generic_mapping_recommendations"]
 
     with st.expander("Automatic mapping recommendations", expanded=True):
@@ -313,7 +323,11 @@ def render_generic_standard_mapping(
             "Recommendations are never approval. Confirm every required mapping or fallback explicitly."
         )
 
-    selections, inference_records = _render_field_choices(frame, recommendations)
+    selections, inference_records = _render_field_choices(
+        frame,
+        recommendations,
+        source_entity_roles,
+    )
     st.markdown("#### Current mapping summary")
     st.dataframe(
         pd.DataFrame(inference_records),
@@ -359,6 +373,7 @@ def render_generic_standard_mapping(
                 frame,
                 selections,
                 extension_columns,
+                source_entity_roles,
             )
         st.rerun()
 

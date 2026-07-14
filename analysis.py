@@ -289,6 +289,22 @@ def normalize_returned(value):
     return pd.NA
 
 
+def format_entity_display_values(series, entity_label):
+    """Format identifier-like values for display without changing source IDs."""
+    text = series.astype("string").str.strip()
+    text = text.str.replace(r"^(-?\d+)\.0+$", r"\1", regex=True)
+    text = text.mask(text.eq(""), pd.NA)
+    return (entity_label + " " + text).mask(text.isna(), pd.NA)
+
+
+def is_numeric_identifier_display(series):
+    present = series.astype("string").str.strip().replace("", pd.NA).dropna()
+    if present.empty:
+        return False
+    parsed = pd.to_numeric(present, errors="coerce")
+    return bool(parsed.notna().all())
+
+
 def calculate_revenue_metrics(orders):
     """Add revenue columns and year_month to the orders table."""
     prepared = orders.copy()
@@ -310,12 +326,28 @@ def calculate_revenue_metrics(orders):
 
     if "category" not in prepared.columns:
         prepared["category"] = "Unknown"
+    elif is_numeric_identifier_display(prepared["category"]):
+        prepared["category"] = format_entity_display_values(
+            prepared["category"], "Category"
+        )
 
     if "customer_name" not in prepared.columns:
-        prepared["customer_name"] = prepared["customer_id"]
+        prepared["customer_name"] = format_entity_display_values(
+            prepared["customer_id"], "Customer"
+        )
+    elif is_numeric_identifier_display(prepared["customer_name"]):
+        prepared["customer_name"] = format_entity_display_values(
+            prepared["customer_name"], "Customer"
+        )
 
     if "product_name" not in prepared.columns:
-        prepared["product_name"] = prepared["product_id"]
+        prepared["product_name"] = format_entity_display_values(
+            prepared["product_id"], "Product"
+        )
+    elif is_numeric_identifier_display(prepared["product_name"]):
+        prepared["product_name"] = format_entity_display_values(
+            prepared["product_name"], "Product"
+        )
 
     invalid_price_or_quantity = (
         prepared["unit_price"].isna()
@@ -461,6 +493,10 @@ def make_monthly_summary(orders):
     valid_month_orders = orders[orders["year_month"].notna()].copy()
     monthly_summary = make_summary_table(valid_month_orders, ["year_month"])
     monthly_summary = monthly_summary.sort_values("year_month")
+    coverage = make_monthly_period_coverage(valid_month_orders)
+    monthly_summary = monthly_summary.merge(
+        coverage, on="year_month", how="left", validate="one_to_one"
+    )
     monthly_summary["previous_revenue"] = monthly_summary["revenue"].shift(1)
     monthly_summary["revenue_growth_amount"] = (
         monthly_summary["revenue"] - monthly_summary["previous_revenue"]
@@ -480,11 +516,77 @@ def make_monthly_summary(orders):
             "return_rate",
             "average_discount_rate",
             "discount_impact_rate",
+            "period_start",
+            "period_end",
+            "observed_min_date",
+            "observed_max_date",
+            "observed_day_count",
+            "calendar_day_count",
+            "is_partial_period",
+            "partial_reason",
             "previous_revenue",
             "revenue_growth_amount",
             "revenue_growth_rate",
         ]
     ]
+
+
+def make_monthly_period_coverage(orders):
+    """Describe observed calendar coverage with conservative boundary checks."""
+    columns = [
+        "year_month",
+        "period_start",
+        "period_end",
+        "observed_min_date",
+        "observed_max_date",
+        "observed_day_count",
+        "calendar_day_count",
+        "is_partial_period",
+        "partial_reason",
+    ]
+    if orders.empty:
+        return pd.DataFrame(columns=columns)
+
+    dated = orders.loc[orders["date"].notna(), ["year_month", "date"]].copy()
+    dated["observed_date"] = dated["date"].dt.normalize()
+    coverage = (
+        dated.groupby("year_month")
+        .agg(
+            observed_min_date=("observed_date", "min"),
+            observed_max_date=("observed_date", "max"),
+            observed_day_count=("observed_date", "nunique"),
+        )
+        .reset_index()
+        .sort_values("year_month")
+    )
+    periods = pd.PeriodIndex(coverage["year_month"], freq="M")
+    coverage["period_start"] = periods.to_timestamp(how="start")
+    coverage["period_end"] = periods.to_timestamp(how="end").normalize()
+    coverage["calendar_day_count"] = periods.days_in_month
+    coverage["is_partial_period"] = False
+    coverage["partial_reason"] = ""
+
+    first_index = coverage.index[0]
+    last_index = coverage.index[-1]
+    if (
+        coverage.loc[first_index, "observed_min_date"]
+        > coverage.loc[first_index, "period_start"]
+    ):
+        coverage.loc[first_index, "is_partial_period"] = True
+        coverage.loc[first_index, "partial_reason"] = (
+            "Partial month starting "
+            f"{coverage.loc[first_index, 'observed_min_date']:%Y-%m-%d}"
+        )
+    if (
+        coverage.loc[last_index, "observed_max_date"]
+        < coverage.loc[last_index, "period_end"]
+    ):
+        coverage.loc[last_index, "is_partial_period"] = True
+        coverage.loc[last_index, "partial_reason"] = (
+            "Partial month through "
+            f"{coverage.loc[last_index, 'observed_max_date']:%Y-%m-%d}"
+        )
+    return coverage[columns]
 
 
 def make_category_summary(orders):
@@ -1121,23 +1223,46 @@ def detect_anomalies(orders, monthly_summary):
 
     if "revenue_growth_rate" not in monthly.columns:
         monthly["revenue_growth_rate"] = monthly["revenue"].pct_change()
+    if "is_partial_period" not in monthly.columns:
+        monthly["is_partial_period"] = False
+    monthly["previous_month"] = monthly["year_month"].shift(1)
 
     for _, row in monthly.iterrows():
         change_rate = row["revenue_growth_rate"]
 
-        if pd.notna(change_rate) and change_rate <= -0.20:
+        current_is_partial = bool(row["is_partial_period"])
+        if (
+            pd.notna(change_rate)
+            and change_rate <= -0.20
+            and not current_is_partial
+        ):
+            revenue_change = row["revenue"] - row["previous_revenue"]
+            affected_month = pd.Period(row["year_month"], freq="M").strftime(
+                "%B %Y"
+            )
+            previous_month = pd.Period(
+                row["previous_month"], freq="M"
+            ).strftime("%B %Y")
             anomaly_rows.append(
                 {
                     "anomaly_type": "sales_drop_over_20_percent",
+                    "anomaly_label": "Monthly revenue dropped by more than 20%",
                     "level": "month",
                     "period": row["year_month"],
                     "order_id": "",
                     "metric_value": change_rate,
                     "threshold": -0.20,
+                    "affected_month": row["year_month"],
+                    "previous_month": row["previous_month"],
+                    "previous_revenue": row["previous_revenue"],
+                    "current_revenue": row["revenue"],
+                    "revenue_change": revenue_change,
+                    "percentage_change": change_rate,
+                    "whether_current_period_is_partial": current_is_partial,
                     "details": (
-                        f"Revenue dropped from "
-                        f"{format_money(row['previous_revenue'])} to "
-                        f"{format_money(row['revenue'])}."
+                        f"{affected_month} revenue decreased by "
+                        f"{abs(change_rate):.1%} compared with {previous_month}, "
+                        f"a reduction of {format_money(abs(revenue_change))}."
                     ),
                 }
             )
@@ -1146,11 +1271,14 @@ def detect_anomalies(orders, monthly_summary):
             anomaly_rows.append(
                 {
                     "anomaly_type": "return_rate_over_15_percent",
+                    "anomaly_label": "Monthly return rate exceeded 15%",
                     "level": "month",
                     "period": row["year_month"],
                     "order_id": "",
                     "metric_value": row["return_rate"],
                     "threshold": 0.15,
+                    "affected_month": row["year_month"],
+                    "whether_current_period_is_partial": current_is_partial,
                     "details": f"Monthly return rate was {row['return_rate']:.1%}.",
                 }
             )
@@ -1161,6 +1289,7 @@ def detect_anomalies(orders, monthly_summary):
         anomaly_rows.append(
             {
                 "anomaly_type": "discount_rate_over_30_percent",
+                "anomaly_label": "Order discount rate exceeded 30%",
                 "level": "order",
                 "period": row["year_month"],
                 "order_id": row["order_id"],
@@ -1177,11 +1306,19 @@ def detect_anomalies(orders, monthly_summary):
         anomaly_rows,
         columns=[
             "anomaly_type",
+            "anomaly_label",
             "level",
             "period",
             "order_id",
             "metric_value",
             "threshold",
+            "affected_month",
+            "previous_month",
+            "previous_revenue",
+            "current_revenue",
+            "revenue_change",
+            "percentage_change",
+            "whether_current_period_is_partial",
             "details",
         ],
     )
@@ -1644,12 +1781,27 @@ def generate_summary_markdown(report_tables, summary_path=DEFAULT_SUMMARY_OUTPUT
     total_units = monthly["units"].sum()
     overall_aov = divide_safely(total_revenue, total_orders)
     discount_impact_rate = divide_safely(total_discount, total_gross_revenue)
-    best_month = monthly.loc[monthly["revenue"].idxmax()]
-    weakest_month = monthly.loc[monthly["revenue"].idxmin()]
-    finite_growth_mask = monthly["revenue_growth_rate"].apply(is_finite_number)
-    finite_growth_months = monthly[finite_growth_mask]
-    non_finite_growth_months = monthly[
-        monthly["revenue_growth_rate"].notna() & ~finite_growth_mask
+    complete_months = (
+        monthly.loc[~monthly["is_partial_period"].fillna(False)].copy()
+        if "is_partial_period" in monthly.columns
+        else monthly.copy()
+    )
+    best_month = (
+        complete_months.loc[complete_months["revenue"].idxmax()]
+        if not complete_months.empty
+        else None
+    )
+    weakest_month = (
+        complete_months.loc[complete_months["revenue"].idxmin()]
+        if not complete_months.empty
+        else None
+    )
+    finite_growth_mask = complete_months["revenue_growth_rate"].apply(
+        is_finite_number
+    )
+    finite_growth_months = complete_months[finite_growth_mask]
+    non_finite_growth_months = complete_months[
+        complete_months["revenue_growth_rate"].notna() & ~finite_growth_mask
     ]
     top_category = categories.iloc[0]
     top_customer = customers.iloc[0] if not customers.empty else None
@@ -1691,16 +1843,29 @@ def generate_summary_markdown(report_tables, summary_path=DEFAULT_SUMMARY_OUTPUT
                 f"- Discounts reduced gross revenue by {format_money(total_discount)}, "
                 f"a {discount_impact_rate:.1%} discount impact."
             ),
-            (
-                f"- The strongest month was {best_month['year_month']} "
-                f"with {format_money(best_month['revenue'])} in revenue."
-            ),
-            (
-                f"- The weakest month was {weakest_month['year_month']} "
-                f"with {format_money(weakest_month['revenue'])} in revenue."
-            ),
         ]
     )
+
+    if best_month is not None:
+        lines.append(
+            f"- The strongest complete month was {best_month['year_month']} "
+            f"with {format_money(best_month['revenue'])} in revenue."
+        )
+        lines.append(
+            f"- The weakest complete month was {weakest_month['year_month']} "
+            f"with {format_money(weakest_month['revenue'])} in revenue."
+        )
+    else:
+        lines.append(
+            "- Strongest and weakest months were not reported because no complete "
+            "calendar month was available."
+        )
+
+    if "is_partial_period" in monthly.columns:
+        for reason in monthly.loc[
+            monthly["is_partial_period"].fillna(False), "partial_reason"
+        ]:
+            lines.append(f"- {reason}.")
 
     if not finite_growth_months.empty:
         best_growth_month = finite_growth_months.loc[
@@ -1950,7 +2115,7 @@ def generate_summary_markdown(report_tables, summary_path=DEFAULT_SUMMARY_OUTPUT
         lines.append("- No anomalies were detected with the current rules.")
     else:
         for _, row in anomalies.head(10).iterrows():
-            lines.append(f"- {row['anomaly_type']}: {row['details']}")
+            lines.append(f"- {row['anomaly_label']}: {row['details']}")
 
     lines.extend(
         [

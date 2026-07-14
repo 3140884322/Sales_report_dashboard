@@ -20,7 +20,6 @@ from generic_report_generation import (
     generate_generic_report,
     run_generic_report_preflight,
 )
-from multi_table_loader import MultiTableLoaderError
 from standard_field_mapping import StandardFieldMappingError
 
 
@@ -206,7 +205,7 @@ def render_generic_report_generation(
     mapping_result,
 ):
     """Render B2.2 preflight, explicit confirmation, and cached report generation."""
-    st.subheader("Step 8: Generic Report Preflight Review")
+    st.subheader("Step 8: Report Preflight Review")
     expenses_file = st.file_uploader(
         "expenses.csv (optional)",
         type=["csv"],
@@ -250,7 +249,7 @@ def render_generic_report_generation(
         on_change=lambda: st.session_state.pop("generic_report_result", None),
     )
     generate_clicked = _button(
-        "Generate Generic Report",
+        "Generate Report",
         icon=":material/analytics:",
         key="generic_report_generate",
         disabled=not preflight.can_generate or not confirmed,
@@ -277,7 +276,6 @@ def render_generic_report_generation(
         except (
             GenericReportGenerationError,
             StandardFieldMappingError,
-            MultiTableLoaderError,
             ValueError,
         ) as error:
             st.session_state["generic_report_error"] = {
@@ -286,7 +284,7 @@ def render_generic_report_generation(
             }
         except Exception as error:
             st.session_state["generic_report_error"] = {
-                "message": f"Could not generate Generic report: {error}",
+                "message": f"Could not generate report: {error}",
                 "traceback": traceback.format_exc(),
             }
 
@@ -298,5 +296,5 @@ def render_generic_report_generation(
 
     report_result = st.session_state.get("generic_report_result")
     if report_result is not None:
-        st.success("Generic report generated and cached for this confirmed input.")
+        st.success("Report generated and cached for this confirmed input.")
     return report_result

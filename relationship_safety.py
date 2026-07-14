@@ -5,6 +5,9 @@ from dataclasses import dataclass
 import pandas as pd
 
 
+MINIMUM_ORDER_GRAIN_MATCH_RATE = 0.20
+
+
 @dataclass(frozen=True)
 class JoinSafetyAssessment:
     match_rate: float
@@ -80,6 +83,8 @@ def evaluate_join_safety(
     comparison_kinds: tuple[str, ...],
     left_role: str,
     right_role: str,
+    left_entity_role: str = "unknown",
+    right_entity_role: str = "unknown",
 ) -> JoinSafetyAssessment:
     """Compute join cardinality and row inflation without performing a merge."""
     if len(left_columns) != len(right_columns):
@@ -132,7 +137,14 @@ def evaluate_join_safety(
     else:
         expected_join_type = "many_to_many"
 
-    fact_to_fact_risk = left_role == "fact" and right_role == "fact"
+    is_order_line_to_header = (
+        left_entity_role == "order_line" and right_entity_role == "order_header"
+    )
+    fact_to_fact_risk = (
+        left_role == "fact"
+        and right_role == "fact"
+        and not is_order_line_to_header
+    )
     block_reasons: list[str] = []
     risk_flags: list[str] = []
 
@@ -163,6 +175,13 @@ def evaluate_join_safety(
         risk_flags.append("fact_to_fact")
         block_reasons.append(
             "Both tables are classified as fact tables; their grains may differ."
+        )
+    if is_order_line_to_header and match_rate < MINIMUM_ORDER_GRAIN_MATCH_RATE:
+        risk_flags.append("order_line_to_header_low_match")
+        block_reasons.append(
+            "Order-line to order-header match rate "
+            f"{match_rate:.1%} is below the required "
+            f"{MINIMUM_ORDER_GRAIN_MATCH_RATE:.1%}."
         )
 
     return JoinSafetyAssessment(

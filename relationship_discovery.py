@@ -65,6 +65,80 @@ class _PairEvidence:
     safety: JoinSafetyAssessment
 
 
+ENTITY_ROLE_ALIASES = (
+    ("order_line", ("order details", "order detail", "order lines", "order line")),
+    ("order_header", ("orders", "sales orders", "order headers")),
+    ("customer", ("customers", "customer", "clients", "buyers")),
+    ("shipper", ("shippers", "shipper", "shipping", "carriers", "carrier")),
+    ("supplier", ("suppliers", "supplier", "vendors", "vendor")),
+    ("employee", ("employees", "employee", "salespeople", "salesperson")),
+    ("product", ("products", "product", "items", "skus")),
+    ("category", ("categories", "category", "product categories")),
+    ("store", ("stores", "store", "shops", "branches")),
+)
+
+FIELD_ENTITY_ALIASES = (
+    ("customer", ("customer", "client", "buyer")),
+    ("shipper", ("shipper", "ship via", "shipping", "carrier", "freight")),
+    ("supplier", ("supplier", "vendor")),
+    ("employee", ("employee", "salesperson", "sales person")),
+    ("product", ("product", "sku", "item")),
+    ("category", ("category", "subcategory")),
+    ("store", ("store", "shop", "branch")),
+    ("order_line", ("order detail", "line item", "line number")),
+    ("order_header", ("order", "invoice")),
+)
+
+
+def _contains_normalized_phrase(value: str, phrase: str) -> bool:
+    normalized_phrase = normalize_column_name(phrase)
+    if value == normalized_phrase:
+        return True
+    if " " not in normalized_phrase:
+        return normalized_phrase in value.split()
+    return normalized_phrase in value
+
+
+def infer_table_entity_role(
+    table: LoadedTable,
+) -> tuple[str, float, tuple[str, ...]]:
+    """Infer a business entity from table, sheet, file, and column combinations."""
+    name_signals = [table.table_name, table.sheet_name or "", table.source_name]
+    normalized_signals = [normalize_column_name(value) for value in name_signals if value]
+    for role, aliases in ENTITY_ROLE_ALIASES:
+        for signal in normalized_signals:
+            if any(_contains_normalized_phrase(signal, alias) for alias in aliases):
+                return role, 0.98, (f"name signal: {signal}",)
+
+    normalized_columns = {
+        normalize_column_name(column) for column in table.frame.columns
+    }
+    column_words = " ".join(sorted(normalized_columns))
+    if {"order id", "product id", "quantity"}.issubset(normalized_columns):
+        return "order_line", 0.90, ("OrderID + ProductID + Quantity columns",)
+    if "order id" in normalized_columns and "order date" in normalized_columns:
+        return "order_header", 0.88, ("OrderID + OrderDate columns",)
+    for role, aliases in ENTITY_ROLE_ALIASES:
+        id_aliases = tuple(f"{alias.rstrip('s')} id" for alias in aliases)
+        if any(_contains_normalized_phrase(column_words, alias) for alias in id_aliases):
+            return role, 0.75, ("entity identifier column combination",)
+    return "unknown", 0.0, ()
+
+
+def infer_column_entity_role(
+    column_name: str,
+    table_entity_role: str,
+) -> tuple[str, float, tuple[str, ...]]:
+    """Infer what business entity one field identifies or describes."""
+    normalized = normalize_column_name(column_name)
+    for role, aliases in FIELD_ENTITY_ALIASES:
+        if any(_contains_normalized_phrase(normalized, alias) for alias in aliases):
+            return role, 0.95, (f"column signal: {normalized}",)
+    if table_entity_role != "unknown":
+        return table_entity_role, 0.80, (f"inherited from {table_entity_role} table",)
+    return "unknown", 0.0, ()
+
+
 def _display_value(value: Any) -> str:
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
@@ -80,6 +154,7 @@ def _profile_column(
     column_name: str,
     position: int,
     config: DiscoveryConfig,
+    table_entity_role: str = "unknown",
 ) -> ColumnProfile:
     series = table.frame[column_name]
     row_count = int(len(series))
@@ -138,6 +213,9 @@ def _profile_column(
         _display_value(value)
         for value in non_null.drop_duplicates().head(config.sample_value_count)
     )
+    entity_role, entity_confidence, entity_evidence = infer_column_entity_role(
+        column_name, table_entity_role
+    )
     return ColumnProfile(
         table_id=table.table_id,
         table_name=table.table_name,
@@ -158,6 +236,9 @@ def _profile_column(
         is_measure_like=measure_like,
         numeric_parse_rate=numeric_parse_rate,
         date_parse_rate=date_parse_rate,
+        entity_role=entity_role,
+        entity_role_confidence=entity_confidence,
+        entity_role_evidence=entity_evidence,
     )
 
 
@@ -326,8 +407,17 @@ def profile_tables(
 
     for table in loaded:
         _validate_table(table)
+        entity_role, entity_confidence, entity_evidence = infer_table_entity_role(
+            table
+        )
         columns = tuple(
-            _profile_column(table, column_name, position, config)
+            _profile_column(
+                table,
+                column_name,
+                position,
+                config,
+                entity_role,
+            )
             for position, column_name in enumerate(table.frame.columns)
         )
         profiles.append(
@@ -339,6 +429,9 @@ def profile_tables(
                 row_count=int(len(table.frame)),
                 column_count=int(len(table.frame.columns)),
                 columns=columns,
+                entity_role=entity_role,
+                entity_role_confidence=entity_confidence,
+                entity_role_evidence=entity_evidence,
             )
         )
 
@@ -623,6 +716,8 @@ def evaluate_relationship_candidate(
         tuple(match.comparison_kind for match in type_matches),
         left_profile.role_guess,
         right_profile.role_guess,
+        left_profile.entity_role,
+        right_profile.entity_role,
     )
     return _make_candidate(
         left_profile,
@@ -658,6 +753,8 @@ def _discover_table_pair(
             (type_match.comparison_kind,),
             left_profile.role_guess,
             right_profile.role_guess,
+            left_profile.entity_role,
+            right_profile.entity_role,
         )
         if safety.match_rate < config.minimum_match_rate:
             continue
@@ -713,6 +810,8 @@ def _discover_table_pair(
             tuple(match.comparison_kind for match in type_matches),
             left_profile.role_guess,
             right_profile.role_guess,
+            left_profile.entity_role,
+            right_profile.entity_role,
         )
         if safety.match_rate < config.minimum_match_rate:
             continue

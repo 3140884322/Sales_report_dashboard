@@ -71,6 +71,16 @@ def get_field_availability_status(report_tables, field_name: str) -> str:
     return str(matches.iloc[0]["availability_status"])
 
 
+def get_field_availability_notes(report_tables, field_name: str) -> str:
+    table = report_tables.get("field_availability")
+    if table is None or table.empty:
+        return ""
+    matches = table[table["field_name"] == field_name]
+    if matches.empty:
+        return ""
+    return str(matches.iloc[0]["notes"])
+
+
 def return_analysis_available(report_tables) -> bool:
     return get_field_availability_status(report_tables, "returned") == "provided"
 
@@ -83,6 +93,8 @@ def customer_analysis_unavailable_message(report_tables) -> str:
     status = get_field_availability_status(report_tables, "customer_id")
     if status == "partially_provided":
         return CUSTOMER_PARTIALLY_PROVIDED_MESSAGE
+    if status == "mapping_conflict":
+        return get_field_availability_notes(report_tables, "customer_id")
     return CUSTOMER_NOT_PROVIDED_MESSAGE
 
 
@@ -313,6 +325,16 @@ def run_generic_report_preflight(
                 f"{customer_availability.provided_row_count or 0:,} / "
                 f"{customer_availability.total_row_count or len(frame):,} valid rows."
             )
+    elif customer_status == "mapping_conflict":
+        conflict = next(
+            (
+                item.notes
+                for item in mapping_result.field_availability
+                if item.field_name == "customer_id"
+            ),
+            "Customer field mapping conflict. Customer analysis was skipped.",
+        )
+        warnings.append(conflict)
 
     for optional_field in ("customer_name", "product_name", "category"):
         if optional_field not in frame.columns:
@@ -569,6 +591,20 @@ def _adapt_generic_report_tables(
             tables["validation_report"],
             tables["expense_post_conversion_quality"],
         )
+        if (
+            get_field_availability_status(tables, "customer_id")
+            == "mapping_conflict"
+            and tables["report_status"].iloc[0]["status"] != "failed"
+        ):
+            status = tables["report_status"].copy()
+            status.loc[0, "status"] = "review_required"
+            status.loc[0, "reason"] = (
+                "Customer field mapping conflict; customer analysis was skipped."
+            )
+            status.loc[0, "warning_count"] = int(
+                status.loc[0, "warning_count"]
+            ) + 1
+            tables["report_status"] = status
 
     return tables
 
@@ -623,6 +659,16 @@ def _generic_markdown_sections(
             [
                 "- Customer Analysis: Not Available.",
                 f"- {CUSTOMER_PARTIALLY_PROVIDED_MESSAGE}",
+            ]
+        )
+    elif customer_status == "mapping_conflict":
+        conflict_notes = get_field_availability_notes(
+            {"field_availability": availability_table}, "customer_id"
+        )
+        lines.extend(
+            [
+                "- Customer Analysis: Not Available.",
+                f"- {conflict_notes}",
             ]
         )
     else:

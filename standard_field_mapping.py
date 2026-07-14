@@ -29,6 +29,24 @@ OPTIONAL_STANDARD_FIELDS = (
     "category",
 )
 STANDARD_FIELDS = REQUIRED_STANDARD_FIELDS + OPTIONAL_STANDARD_FIELDS
+ENTITY_STANDARD_FIELDS = {
+    "customer_id": "customer",
+    "customer_name": "customer",
+    "product_id": "product",
+    "product_name": "product",
+    "category": "category",
+}
+KNOWN_ENTITY_ROLES = {
+    "customer",
+    "shipper",
+    "supplier",
+    "employee",
+    "product",
+    "category",
+    "store",
+    "order_header",
+    "order_line",
+}
 SEVERE_CONVERSION_FAILURE_RATE = 0.05
 RECOMMENDATION_THRESHOLD = 50.0
 PROFILE_SAMPLE_SIZE = 200
@@ -211,6 +229,25 @@ class StandardFieldMappingError(ValueError):
         super().__init__(" ".join(self.errors))
 
 
+def build_source_entity_role_map(
+    discovery_result,
+    fact_table_id: str,
+) -> dict[str, str]:
+    """Map merged output column names to discovery entity-role metadata."""
+    if discovery_result is None:
+        return {}
+    roles = {}
+    for profile in discovery_result.table_profiles:
+        for column in profile.columns:
+            output_column = (
+                column.column_name
+                if profile.table_id == fact_table_id
+                else f"{profile.table_id}.{column.column_name}"
+            )
+            roles[output_column] = column.entity_role
+    return roles
+
+
 @dataclass(frozen=True)
 class _ColumnEvidence:
     numeric_rate: float
@@ -307,6 +344,70 @@ def _contains_phrase(normalized: str, phrase: str) -> bool:
     )
 
 
+def _source_entity_role(
+    source_column: object,
+    source_entity_roles: Mapping[str, str] | None = None,
+) -> str:
+    source_name = str(source_column)
+    if source_entity_roles and source_name in source_entity_roles:
+        return source_entity_roles[source_name]
+
+    normalized = normalize_column_name(source_name)
+    role_aliases = (
+        (
+            "shipper",
+            (
+                "shipper",
+                "shippers",
+                "shipping",
+                "carrier",
+                "carriers",
+                "freight",
+                "ship via",
+            ),
+        ),
+        ("supplier", ("supplier", "suppliers", "vendor", "vendors")),
+        (
+            "employee",
+            ("employee", "employees", "salesperson", "salespeople", "sales person"),
+        ),
+        (
+            "customer",
+            ("customer", "customers", "client", "clients", "buyer", "buyers"),
+        ),
+        ("category", ("category", "categories", "subcategory")),
+        ("product", ("product", "products", "sku", "item", "items")),
+        ("store", ("store", "stores", "shop", "branch")),
+    )
+    for role, aliases in role_aliases:
+        if any(_contains_phrase(normalized, alias) for alias in aliases):
+            return role
+    return "unknown"
+
+
+def _identifier_display_source(source_column: object) -> bool:
+    local = _normalized_local_name(source_column)
+    words = set(local.split())
+    return bool(words.intersection({"id", "key", "code", "number", "no"}))
+
+
+def _format_identifier(value: object) -> object:
+    if pd.isna(value):
+        return pd.NA
+    text = str(value).strip()
+    if not text:
+        return pd.NA
+    numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+    if pd.notna(numeric) and float(numeric).is_integer():
+        return str(int(numeric))
+    return text
+
+
+def _entity_display_series(series: pd.Series, label: str) -> pd.Series:
+    identifiers = series.map(_format_identifier).astype("string")
+    return (label + " " + identifiers).mask(identifiers.isna(), pd.NA)
+
+
 def _name_alias_score(standard_field: str, column: object) -> float:
     local = _normalized_local_name(column)
     aliases = FIELD_ALIASES[standard_field]
@@ -343,6 +444,7 @@ def _score_source_column(
     standard_field: str,
     column: object,
     evidence: _ColumnEvidence,
+    source_entity_roles: Mapping[str, str] | None = None,
 ) -> tuple[float, dict[str, float], str]:
     target_type = TARGET_TYPES[standard_field]
     name_score = _name_alias_score(standard_field, column)
@@ -350,22 +452,44 @@ def _score_source_column(
     compatibility = _compatibility_rate(target_type, evidence)
     semantic_score = round(15.0 * compatibility, 2)
     sample_score = round(15.0 * compatibility, 2)
+    expected_entity = ENTITY_STANDARD_FIELDS.get(standard_field)
+    source_entity = _source_entity_role(column, source_entity_roles)
+    entity_role_score = 0.0
+    if expected_entity and source_entity == expected_entity:
+        entity_role_score = 20.0
+    elif expected_entity and source_entity in KNOWN_ENTITY_ROLES:
+        entity_role_score = -70.0
 
-    score = name_score + context_score + semantic_score + sample_score
+    display_identifier_penalty = 0.0
+    if standard_field in {"customer_name", "product_name", "category"} and (
+        _identifier_display_source(column)
+    ):
+        display_identifier_penalty = -45.0
+
+    score = (
+        name_score
+        + context_score
+        + semantic_score
+        + sample_score
+        + entity_role_score
+        + display_identifier_penalty
+    )
     if target_type in {"money", "number", "rate", "date", "boolean"}:
         if evidence.sample_count and compatibility < 0.5:
             score = min(score, 45.0)
-    score = round(min(score, 100.0), 2)
+    score = round(max(0.0, min(score, 100.0)), 2)
     breakdown = {
         "column_name_alias": round(name_score, 2),
         "business_context": round(context_score, 2),
         "semantic_type": semantic_score,
         "sample_value_compatibility": sample_score,
+        "entity_role_consistency": entity_role_score,
+        "identifier_display_penalty": display_identifier_penalty,
     }
     explanation = (
         f"Column name contributes {name_score:.0f} points; business context contributes "
         f"{context_score:.0f}; {compatibility:.0%} of sampled values are compatible "
-        f"with target type {target_type}."
+        f"with target type {target_type}; source entity role is {source_entity}."
     )
     return score, breakdown, explanation
 
@@ -374,6 +498,7 @@ def evaluate_field_mapping_recommendation(
     frame: pd.DataFrame,
     standard_field: str,
     source_column: str,
+    source_entity_roles: Mapping[str, str] | None = None,
 ) -> FieldMappingRecommendation:
     """Re-score a user-selected source using the same explainable rules."""
     if standard_field not in STANDARD_FIELDS:
@@ -382,7 +507,10 @@ def evaluate_field_mapping_recommendation(
         raise KeyError(f"Source column {source_column!r} was not found.")
     evidence = _profile_column(frame[source_column])
     score, breakdown, explanation = _score_source_column(
-        standard_field, source_column, evidence
+        standard_field,
+        source_column,
+        evidence,
+        source_entity_roles,
     )
     return FieldMappingRecommendation(
         standard_field=standard_field,
@@ -440,6 +568,8 @@ def _fallback_recommendation(standard_field: str) -> FieldMappingRecommendation:
             "business_context": 0.0,
             "semantic_type": 0.0,
             "sample_value_compatibility": 0.0,
+            "entity_role_consistency": 0.0,
+            "identifier_display_penalty": 0.0,
         },
         explanation=explanation,
     )
@@ -447,6 +577,7 @@ def _fallback_recommendation(standard_field: str) -> FieldMappingRecommendation:
 
 def recommend_standard_field_mappings(
     frame: pd.DataFrame,
+    source_entity_roles: Mapping[str, str] | None = None,
 ) -> tuple[FieldMappingRecommendation, ...]:
     """Recommend unique source mappings without changing the merged DataFrame."""
     evidence = {column: _profile_column(frame[column]) for column in frame.columns}
@@ -454,7 +585,10 @@ def recommend_standard_field_mappings(
     for standard_field in STANDARD_FIELDS:
         for column in frame.columns:
             score, breakdown, explanation = _score_source_column(
-                standard_field, column, evidence[column]
+                standard_field,
+                column,
+                evidence[column],
+                source_entity_roles,
             )
             if score >= RECOMMENDATION_THRESHOLD:
                 scored_pairs.append(
@@ -630,6 +764,8 @@ def _strategy_recommendation(
             "business_context": 0.0,
             "semantic_type": 0.0,
             "sample_value_compatibility": 0.0,
+            "entity_role_consistency": 0.0,
+            "identifier_display_penalty": 0.0,
         },
         explanation=explanations.get(selection.strategy, "User-selected strategy."),
     )
@@ -638,6 +774,7 @@ def _strategy_recommendation(
 def _field_availability(
     plan: StandardFieldMappingPlan,
     output: pd.DataFrame | None = None,
+    customer_mapping_issue: str | None = None,
 ) -> tuple[FieldAvailability, ...]:
     records = []
     for selection in plan.selections:
@@ -703,6 +840,9 @@ def _field_availability(
                     f"Mapped from source column {selection.source_column}. "
                     + count_note
                 )
+            if customer_mapping_issue and provided_row_count:
+                status = "mapping_conflict"
+                notes = f"{customer_mapping_issue} {count_note}"
 
         records.append(
             FieldAvailability(
@@ -719,10 +859,46 @@ def _field_availability(
     return tuple(records)
 
 
+def _customer_mapping_issue(
+    plan: StandardFieldMappingPlan,
+    source_entity_roles: Mapping[str, str] | None,
+) -> str | None:
+    selections = {item.standard_field: item for item in plan.selections}
+    customer_id = selections["customer_id"]
+    customer_name = selections["customer_name"]
+    if customer_id.strategy != "source":
+        return None
+
+    id_role = _source_entity_role(
+        customer_id.source_column, source_entity_roles
+    )
+    if id_role != "customer":
+        return (
+            "Customer field mapping conflict: customer_id source "
+            f"{customer_id.source_column!r} is classified as {id_role}, not customer. "
+            "Customer analysis was skipped."
+        )
+
+    if customer_name.strategy != "source":
+        return None
+    name_role = _source_entity_role(
+        customer_name.source_column, source_entity_roles
+    )
+    if name_role != "customer":
+        return (
+            "Customer field mapping conflict: customer_name source "
+            f"{customer_name.source_column!r} is classified as {name_role}, while "
+            f"customer_id source {customer_id.source_column!r} is customer. "
+            "Customer analysis was skipped."
+        )
+    return None
+
+
 def _convert_selection(
     frame: pd.DataFrame,
     selection: StandardFieldSelection,
     converted_fields: Mapping[str, pd.Series],
+    source_entity_roles: Mapping[str, str] | None = None,
 ) -> tuple[pd.Series, FieldConversionDiagnostic, tuple[str, ...], tuple[str, ...]]:
     field = selection.standard_field
     required = field in REQUIRED_STANDARD_FIELDS
@@ -733,7 +909,10 @@ def _convert_selection(
     if selection.strategy == "source":
         raw = frame[selection.source_column]
         recommendation = evaluate_field_mapping_recommendation(
-            frame, field, selection.source_column
+            frame,
+            field,
+            selection.source_column,
+            source_entity_roles,
         )
         present = _present_mask(raw)
         if TARGET_TYPES[field] == "date":
@@ -744,6 +923,10 @@ def _convert_selection(
             )
         elif TARGET_TYPES[field] == "boolean":
             converted = _to_boolean_series(raw)
+        elif field == "category" and _identifier_display_source(
+            selection.source_column
+        ):
+            converted = _entity_display_series(raw, "Category")
         else:
             converted = raw.astype("string").str.strip().mask(~present, pd.NA)
         source_non_null_count = int(present.sum())
@@ -876,6 +1059,7 @@ def generate_unified_orders(
     frame: pd.DataFrame,
     selections: Iterable[StandardFieldSelection],
     selected_extension_columns: Sequence[str] = (),
+    source_entity_roles: Mapping[str, str] | None = None,
 ) -> StandardMappingResult:
     """Validate and convert a merged dataset without mutating it or running analysis.py."""
     source_memory = int(frame.memory_usage(index=True, deep=True).sum())
@@ -909,7 +1093,10 @@ def generate_unified_orders(
         if selection.strategy == "omit":
             continue
         converted, diagnostic, field_errors, field_warnings = _convert_selection(
-            frame, selection, converted_fields
+            frame,
+            selection,
+            converted_fields,
+            source_entity_roles,
         )
         output[selection.standard_field] = converted
         converted_fields[selection.standard_field] = converted
@@ -920,7 +1107,16 @@ def generate_unified_orders(
     for column in plan.selected_extension_columns:
         output[column] = frame[column].copy(deep=False)
 
-    availability = _field_availability(plan, output)
+    customer_mapping_issue = _customer_mapping_issue(
+        plan, source_entity_roles
+    )
+    availability = _field_availability(
+        plan,
+        output,
+        customer_mapping_issue,
+    )
+    if customer_mapping_issue:
+        warnings.append(customer_mapping_issue)
 
     missing_required = [
         field for field in REQUIRED_STANDARD_FIELDS if field not in output.columns

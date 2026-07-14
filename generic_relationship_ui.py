@@ -393,6 +393,8 @@ def _table_profile_records(discovery_result):
             "columns": profile.column_count,
             "role": profile.role_guess,
             "role_confidence": profile.role_confidence,
+            "entity_role": profile.entity_role,
+            "entity_confidence": profile.entity_role_confidence,
         }
         for profile in discovery_result.table_profiles
     ]
@@ -532,7 +534,7 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
 
 def render_generic_relationship_mode():
     """Render B1 discovery, explicit decisions, plan validation, and safe merge."""
-    st.subheader("Step 1: Upload Generic Tables")
+    st.subheader("Step 1: Upload Tables")
     uploaded_files = st.file_uploader(
         "CSV or xlsx files",
         type=["csv", "xlsx"],

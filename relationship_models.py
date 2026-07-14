@@ -41,6 +41,9 @@ class ColumnProfile:
     is_measure_like: bool
     numeric_parse_rate: float
     date_parse_rate: float
+    entity_role: str = "unknown"
+    entity_role_confidence: float = 0.0
+    entity_role_evidence: tuple[str, ...] = ()
 
 
 @dataclass
@@ -57,6 +60,9 @@ class TableProfile:
     role_guess: str = "unknown"
     role_confidence: float = 0.0
     role_evidence: tuple[str, ...] = ()
+    entity_role: str = "unknown"
+    entity_role_confidence: float = 0.0
+    entity_role_evidence: tuple[str, ...] = ()
 
     def get_column(self, column_name: str) -> ColumnProfile:
         for column in self.columns:
