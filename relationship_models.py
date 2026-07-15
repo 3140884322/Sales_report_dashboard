@@ -57,9 +57,11 @@ class TableProfile:
     row_count: int
     column_count: int
     columns: tuple[ColumnProfile, ...]
+    encoding: str | None = None
     role_guess: str = "unknown"
     role_confidence: float = 0.0
     role_evidence: tuple[str, ...] = ()
+    role_score_breakdown: dict[str, float] = field(default_factory=dict)
     entity_role: str = "unknown"
     entity_role_confidence: float = 0.0
     entity_role_evidence: tuple[str, ...] = ()

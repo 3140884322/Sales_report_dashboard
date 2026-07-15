@@ -8,7 +8,13 @@ import pandas as pd
 from pandas.api.types import is_bool_dtype, is_datetime64_any_dtype, is_numeric_dtype
 
 from analysis import REQUIRED_COLUMNS
-from relationship_aliases import normalize_column_name
+from relationship_aliases import (
+    FIELD_ENTITY_ALIASES,
+    STANDARD_FIELD_RELATIONSHIP_ALIASES,
+    contains_alias,
+    is_key_like_name,
+    normalize_column_name,
+)
 from standard_field_models import (
     FieldConversionDiagnostic,
     FieldAvailability,
@@ -240,6 +246,12 @@ FIELD_ALIASES = {
     },
 }
 
+for standard_field, shared_aliases in STANDARD_FIELD_RELATIONSHIP_ALIASES.items():
+    for shared_alias in shared_aliases:
+        FIELD_ALIASES[standard_field].setdefault(
+            normalize_column_name(shared_alias), 56
+        )
+
 FIELD_CONTEXTS = {
     "order_id": ("order", "transaction", "invoice", "订单", "交易"),
     "date": ("order", "transaction", "sales", "purchase", "订单", "交易"),
@@ -425,42 +437,15 @@ def _source_entity_role(
         return source_entity_roles[source_name]
 
     normalized = normalize_column_name(source_name)
-    role_aliases = (
-        (
-            "shipper",
-            (
-                "shipper",
-                "shippers",
-                "shipping",
-                "carrier",
-                "carriers",
-                "freight",
-                "ship via",
-            ),
-        ),
-        ("supplier", ("supplier", "suppliers", "vendor", "vendors")),
-        (
-            "employee",
-            ("employee", "employees", "salesperson", "salespeople", "sales person"),
-        ),
-        (
-            "customer",
-            ("customer", "customers", "client", "clients", "buyer", "buyers"),
-        ),
-        ("category", ("category", "categories", "subcategory")),
-        ("product", ("product", "products", "sku", "item", "items")),
-        ("store", ("store", "stores", "shop", "branch", "outlet")),
-    )
-    for role, aliases in role_aliases:
-        if any(_contains_phrase(normalized, alias) for alias in aliases):
+    for role, aliases in FIELD_ENTITY_ALIASES:
+        if any(contains_alias(normalized, alias) for alias in aliases):
             return role
     return "unknown"
 
 
 def _identifier_display_source(source_column: object) -> bool:
     local = _normalized_local_name(source_column)
-    words = set(local.split())
-    return bool(words.intersection({"id", "key", "code", "number", "no"}))
+    return is_key_like_name(local)
 
 
 def _format_identifier(value: object) -> object:

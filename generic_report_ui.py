@@ -21,6 +21,8 @@ from generic_report_generation import (
     run_generic_report_preflight,
 )
 from standard_field_mapping import StandardFieldMappingError
+from ui_guidance import blocked_reason_key, render_blocked_reason, render_step_guide
+from ui_i18n import t
 
 
 BUTTON_SUPPORTS_ICON = "icon" in inspect.signature(st.button).parameters
@@ -96,14 +98,15 @@ def _preflight_options(mapping_result):
     invalid_date_count = int(dates.isna().sum())
 
     if invalid_date_count:
-        st.markdown("#### Invalid date decision")
+        st.markdown(f"#### {t('preflight.invalid_date_title')}")
+        st.caption(t("preflight.invalid_date_explain"))
         date_action = st.radio(
-            "How should invalid dates be handled?",
+            t("preflight.invalid_date_question"),
             [INVALID_DATE_ACTION_BLOCK, INVALID_DATE_ACTION_EXCLUDE_MONTHLY],
             format_func=lambda value: (
-                "Stop and fix the source data"
+                t("preflight.invalid_date_block")
                 if value == INVALID_DATE_ACTION_BLOCK
-                else "Continue; exclude these rows from monthly analysis only"
+                else t("preflight.invalid_date_continue")
             ),
             key="generic_report_date_action",
             on_change=_clear_report_output,
@@ -112,9 +115,10 @@ def _preflight_options(mapping_result):
         date_action = INVALID_DATE_ACTION_EXCLUDE_MONTHLY
 
     if critical_count:
-        st.markdown("#### Critical row decision")
+        st.markdown(f"#### {t('preflight.critical_title')}")
+        st.caption(t("preflight.critical_help"))
         exclude_critical = st.checkbox(
-            f"Explicitly exclude all {critical_count:,} invalid price/quantity row(s) from the report",
+            t("preflight.exclude_critical", count=f"{critical_count:,}"),
             key="generic_report_exclude_critical",
             on_change=_clear_report_output,
         )
@@ -126,41 +130,59 @@ def _preflight_options(mapping_result):
 
 def _render_preflight_summary(preflight, mapping_result):
     metrics = st.columns(6)
-    metrics[0].metric("Original fact rows", f"{preflight.original_fact_row_count:,}")
-    metrics[1].metric("Merged rows", f"{preflight.merged_row_count:,}")
-    metrics[2].metric("Unified rows", f"{preflight.unified_row_count:,}")
-    metrics[3].metric("Excluded rows", f"{preflight.excluded_row_count:,}")
-    metrics[4].metric("Calculation rows", f"{preflight.calculation_row_count:,}")
-    metrics[5].metric("Estimated memory", _memory_text(preflight.estimated_memory_bytes))
+    metrics[0].metric(t("preflight.original_rows"), f"{preflight.original_fact_row_count:,}")
+    metrics[1].metric(t("preflight.merged_rows"), f"{preflight.merged_row_count:,}")
+    metrics[2].metric(t("preflight.unified_rows"), f"{preflight.unified_row_count:,}")
+    metrics[3].metric(t("preflight.excluded_rows"), f"{preflight.excluded_row_count:,}")
+    metrics[4].metric(t("preflight.calculation_rows"), f"{preflight.calculation_row_count:,}")
+    metrics[5].metric(t("preflight.memory"), _memory_text(preflight.estimated_memory_bytes))
 
     date_range = (
-        "Not available"
+        t("common.not_available")
         if preflight.date_min is None
         else f"{preflight.date_min.date()} to {preflight.date_max.date()}"
     )
-    st.write(f"Data date range: {date_range}")
-    st.write(
-        "Rows excluded from monthly analysis because of invalid dates: "
-        f"{preflight.monthly_analysis_excluded_row_count:,}"
-    )
+    st.write(t("preflight.date_range", date_range=date_range))
+    st.write(t(
+        "preflight.monthly_excluded",
+        count=f"{preflight.monthly_analysis_excluded_row_count:,}",
+    ))
 
-    st.markdown("#### Standard field sources and availability")
+    st.markdown(f"#### {t('preflight.availability')}")
     st.dataframe(
         field_availability_table(mapping_result.field_availability),
         hide_index=True,
         use_container_width=True,
+        column_config={
+            "field_name": t("availability.column.field"),
+            "availability_status": t("availability.column.status"),
+            "source_column": t("availability.column.source"),
+            "default_value": t("availability.column.default"),
+            "user_confirmed": t("availability.column.user_confirmed"),
+            "notes": t("table.column.notes"),
+            "provided_row_count": t("availability.column.provided_rows"),
+            "total_row_count": t("availability.column.total_rows"),
+        },
     )
 
     diagnostic_columns = st.columns(2)
     with diagnostic_columns[0]:
-        st.markdown("#### Conversion results")
+        st.markdown(f"#### {t('preflight.conversions')}")
         st.dataframe(
             pd.DataFrame(_conversion_records(mapping_result)),
             hide_index=True,
             use_container_width=True,
+            column_config={
+                "standard_field": t("mapping.column.standard_field"),
+                "source_or_strategy": t("mapping.column.source_strategy"),
+                "conversion_failures": t("mapping.column.conversion_failures"),
+                "invalid_values": t("mapping.column.invalid_values"),
+                "null_values": t("mapping.column.null_values"),
+                "status": t("common.status"),
+            },
         )
     with diagnostic_columns[1]:
-        st.markdown("#### Required field null counts")
+        st.markdown(f"#### {t('preflight.nulls')}")
         st.dataframe(
             pd.DataFrame(
                 [
@@ -170,17 +192,21 @@ def _render_preflight_summary(preflight, mapping_result):
             ),
             hide_index=True,
             use_container_width=True,
+            column_config={
+                "standard_field": t("mapping.column.standard_field"),
+                "null_values": t("mapping.column.null_values"),
+            },
         )
 
     if not preflight.critical_rows_preview.empty:
-        with st.expander("Invalid price/quantity rows (first 20)", expanded=True):
+        with st.expander(t("preflight.invalid_price_rows"), expanded=True):
             st.dataframe(
                 preflight.critical_rows_preview,
                 hide_index=True,
                 use_container_width=True,
             )
     if not preflight.invalid_date_rows_preview.empty:
-        with st.expander("Invalid date rows (first 20)", expanded=True):
+        with st.expander(t("preflight.invalid_date_rows"), expanded=True):
             st.dataframe(
                 preflight.invalid_date_rows_preview,
                 hide_index=True,
@@ -189,7 +215,12 @@ def _render_preflight_summary(preflight, mapping_result):
 
     for issue in preflight.issues:
         if issue.severity == "critical":
-            st.error(f"{issue.field_name}: {issue.message} ({issue.row_count:,} rows)")
+            st.error(t(
+                "preflight.issue",
+                field=issue.field_name,
+                message=issue.message,
+                count=f"{issue.row_count:,}",
+            ))
         else:
             st.warning(issue.message)
     for warning in preflight.warnings:
@@ -205,12 +236,15 @@ def render_generic_report_generation(
     mapping_result,
 ):
     """Render B2.2 preflight, explicit confirmation, and cached report generation."""
-    st.subheader("Report Preflight Review")
+    render_step_guide(7)
+    st.subheader(t("preflight.title"))
+    st.write(t("preflight.intro"))
+    st.info(t("preflight.classification"))
     expenses_file = st.file_uploader(
-        "expenses.csv (optional)",
+        t("preflight.expenses_label"),
         type=["csv"],
         key="generic_report_expenses_file",
-        help="Expenses are passed separately to the existing finance workflow and are never merged into orders.",
+        help=t("preflight.expenses_help"),
     )
     signature = _mapping_report_signature(mapping_result, expenses_file)
     clear_generic_report_if_inputs_changed(st.session_state, signature)
@@ -232,33 +266,45 @@ def render_generic_report_generation(
         mapping_result=mapping_result,
         preflight=preflight,
     )
-    with st.expander("Data Preparation Summary", expanded=True):
+    with st.expander(t("preflight.preparation"), expanded=True):
         st.dataframe(
             preparation_summary.astype("string"),
             hide_index=True,
             use_container_width=True,
+            column_config={
+                "section": t("table.column.section"),
+                "item": t("table.column.item"),
+                "value": t("table.column.value"),
+                "notes": t("table.column.notes"),
+            },
         )
 
     if preflight.calculation_row_count >= LARGE_EXCEL_ROW_WARNING:
-        st.info("Full audit Excel may take about one minute for large datasets.")
+        st.info(t("preflight.large_excel"))
 
     confirmed = st.checkbox(
-        "I confirm the selected relationships, field mappings, assumptions, and excluded rows.",
+        t("preflight.confirm"),
         key="generic_report_confirm",
         disabled=not preflight.can_generate,
         on_change=lambda: st.session_state.pop("generic_report_result", None),
     )
+    report_block_reason = blocked_reason_key(
+        "generate_report",
+        preflight_ready=preflight.can_generate,
+        confirmed=confirmed,
+    )
+    render_blocked_reason(report_block_reason)
     generate_clicked = _button(
-        "Generate Report",
+        t("preflight.generate"),
         icon=":material/analytics:",
         key="generic_report_generate",
         disabled=not preflight.can_generate or not confirmed,
     )
     if generate_clicked:
-        progress = st.progress(0, text="1/5 Validating unified orders")
+        progress = st.progress(0, text=t("preflight.progress.5"))
 
         def update_progress(percent, message):
-            progress.progress(percent, text=message)
+            progress.progress(percent, text=t(f"preflight.progress.{percent}"))
 
         try:
             report_result = generate_generic_report(
@@ -284,17 +330,17 @@ def render_generic_report_generation(
             }
         except Exception as error:
             st.session_state["generic_report_error"] = {
-                "message": f"Could not generate report: {error}",
+                "message": t("preflight.report_failed", error=error),
                 "traceback": traceback.format_exc(),
             }
 
     report_error = st.session_state.get("generic_report_error")
     if report_error:
         st.error(report_error["message"])
-        with st.expander("Debug details"):
+        with st.expander(t("common.debug_details")):
             st.code(report_error["traceback"])
 
     report_result = st.session_state.get("generic_report_result")
     if report_result is not None:
-        st.success("Report generated and cached for this confirmed input.")
+        st.success(t("preflight.report_cached"))
     return report_result

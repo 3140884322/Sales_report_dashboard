@@ -720,7 +720,9 @@ class PizzaFourCsvEndToEndTests(unittest.TestCase):
             for column in metric_columns
             for call in column.metric.call_args_list
         ]
-        self.assertNotIn("Top Customer", metric_labels)
+        self.assertFalse(
+            {"Top Customer", "销售额最高客户"}.intersection(metric_labels)
+        )
 
         with (
             patch.object(dashboard_app, "st") as streamlit_mock,
@@ -738,7 +740,9 @@ class PizzaFourCsvEndToEndTests(unittest.TestCase):
             info_messages = [
                 call.args[0] for call in streamlit_mock.info.call_args_list
             ]
-            self.assertIn(CUSTOMER_NOT_PROVIDED_MESSAGE, info_messages)
+            self.assertIn(
+                dashboard_app.t("report.customer_not_provided"), info_messages
+            )
 
         with patch.object(dashboard_app, "st") as streamlit_mock:
             dashboard_app.show_business_insights(self.report["report_tables"])
@@ -746,6 +750,7 @@ class PizzaFourCsvEndToEndTests(unittest.TestCase):
                 str(call.args[0]) for call in streamlit_mock.write.call_args_list
             )
             self.assertNotIn("Top customer", insight_text)
+            self.assertNotIn("销售额最高客户", insight_text)
 
         with (
             patch.object(dashboard_app, "st"),
@@ -753,7 +758,9 @@ class PizzaFourCsvEndToEndTests(unittest.TestCase):
         ):
             dashboard_app.show_detail_tables(self.report)
             expander_titles = [call.args[0] for call in expander.call_args_list]
-            self.assertNotIn("Top Customers", expander_titles)
+            self.assertFalse(
+                {"Top Customers", "客户排行"}.intersection(expander_titles)
+            )
 
 
 class CustomerNameWithoutIdReportTests(unittest.TestCase):

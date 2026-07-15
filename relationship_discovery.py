@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
+import re
 from statistics import median
 from typing import Any
 
@@ -15,8 +16,11 @@ from pandas.api.types import (
 
 from generic_table_reader import read_tabular_sources
 from relationship_aliases import (
+    ENTITY_ROLE_ALIASES,
+    FIELD_ENTITY_ALIASES,
     NameMatch,
     compare_column_names,
+    contains_alias,
     is_key_like_name,
     is_measure_like_name,
     normalize_column_name,
@@ -29,7 +33,11 @@ from relationship_models import (
     RelationshipDiscoveryResult,
     TableProfile,
 )
-from relationship_safety import JoinSafetyAssessment, evaluate_join_safety
+from relationship_safety import (
+    JoinSafetyAssessment,
+    canonicalize_key_series,
+    evaluate_join_safety,
+)
 
 
 class RelationshipDiscoveryError(ValueError):
@@ -46,6 +54,13 @@ class DiscoveryConfig:
     maximum_prefiltered_pairs_per_table_pair: int = 16
     maximum_composite_components: int = 6
     composite_minimum_right_uniqueness: float = 0.95
+    fallback_minimum_non_null_count: int = 5
+    fallback_minimum_match_rate: float = 0.85
+    fallback_minimum_right_uniqueness: float = 0.98
+    fallback_sample_size: int = 2000
+    fallback_maximum_columns_per_table: int = 8
+    fallback_maximum_pairs_per_table_pair: int = 4
+    fallback_maximum_confidence: float = 79.99
 
 
 @dataclass(frozen=True)
@@ -65,38 +80,8 @@ class _PairEvidence:
     safety: JoinSafetyAssessment
 
 
-ENTITY_ROLE_ALIASES = (
-    ("order_line", ("order details", "order detail", "order lines", "order line")),
-    ("order_header", ("orders", "sales orders", "order headers")),
-    ("customer", ("customers", "customer", "clients", "buyers")),
-    ("shipper", ("shippers", "shipper", "shipping", "carriers", "carrier")),
-    ("supplier", ("suppliers", "supplier", "vendors", "vendor")),
-    ("employee", ("employees", "employee", "salespeople", "salesperson")),
-    ("product", ("products", "product", "items", "skus")),
-    ("category", ("categories", "category", "product categories")),
-    ("store", ("stores", "store", "shops", "branches")),
-)
-
-FIELD_ENTITY_ALIASES = (
-    ("customer", ("customer", "client", "buyer")),
-    ("shipper", ("shipper", "ship via", "shipping", "carrier", "freight")),
-    ("supplier", ("supplier", "vendor")),
-    ("employee", ("employee", "salesperson", "sales person")),
-    ("category", ("category", "subcategory")),
-    ("product", ("product", "sku", "item")),
-    ("store", ("store", "shop", "branch")),
-    ("order_line", ("order detail", "line item", "line number")),
-    ("order_header", ("order", "invoice")),
-)
-
-
 def _contains_normalized_phrase(value: str, phrase: str) -> bool:
-    normalized_phrase = normalize_column_name(phrase)
-    if value == normalized_phrase:
-        return True
-    if " " not in normalized_phrase:
-        return normalized_phrase in value.split()
-    return normalized_phrase in value
+    return contains_alias(value, phrase)
 
 
 def infer_table_entity_role(
@@ -107,20 +92,24 @@ def infer_table_entity_role(
     normalized_signals = [normalize_column_name(value) for value in name_signals if value]
     for role, aliases in ENTITY_ROLE_ALIASES:
         for signal in normalized_signals:
-            if any(_contains_normalized_phrase(signal, alias) for alias in aliases):
+            if any(contains_alias(signal, alias) for alias in aliases):
                 return role, 0.98, (f"name signal: {signal}",)
 
-    normalized_columns = {
-        normalize_column_name(column) for column in table.frame.columns
+    column_concepts = {
+        concept
+        for column in table.frame.columns
+        for concept in semantic_tokens(column)
     }
-    column_words = " ".join(sorted(normalized_columns))
-    if {"order id", "product id", "quantity"}.issubset(normalized_columns):
+    if {"order", "product", "quantity"}.issubset(column_concepts):
         return "order_line", 0.90, ("OrderID + ProductID + Quantity columns",)
-    if "order id" in normalized_columns and "order date" in normalized_columns:
+    if {"order", "date"}.issubset(column_concepts):
         return "order_header", 0.88, ("OrderID + OrderDate columns",)
-    for role, aliases in ENTITY_ROLE_ALIASES:
-        id_aliases = tuple(f"{alias.rstrip('s')} id" for alias in aliases)
-        if any(_contains_normalized_phrase(column_words, alias) for alias in id_aliases):
+    for role, aliases in FIELD_ENTITY_ALIASES:
+        if any(
+            contains_alias(column, alias)
+            for column in table.frame.columns
+            for alias in aliases
+        ):
             return role, 0.75, ("entity identifier column combination",)
     return "unknown", 0.0, ()
 
@@ -132,7 +121,7 @@ def infer_column_entity_role(
     """Infer what business entity one field identifies or describes."""
     normalized = normalize_column_name(column_name)
     for role, aliases in FIELD_ENTITY_ALIASES:
-        if any(_contains_normalized_phrase(normalized, alias) for alias in aliases):
+        if any(contains_alias(normalized, alias) for alias in aliases):
             return role, 0.95, (f"column signal: {normalized}",)
     if table_entity_role != "unknown":
         return table_entity_role, 0.80, (f"inherited from {table_entity_role} table",)
@@ -307,6 +296,9 @@ def _role_scores(
     if median_rows and profile.row_count >= 2 * median_rows:
         fact_score += 0.05
         fact_evidence.append("row count materially above median")
+    if profile.entity_role in {"order_line", "order_header"}:
+        fact_score += 0.10
+        fact_evidence.append("table/file name suggests sales or orders")
 
     if unique_keys:
         dimension_score += 0.30
@@ -320,6 +312,12 @@ def _role_scores(
     if all_concepts.intersection({"customer", "product", "store", "category"}):
         dimension_score += 0.15
         dimension_evidence.append("entity-oriented columns")
+    if profile.entity_role in {
+        "customer", "product", "store", "category", "supplier", "employee",
+        "shipper", "region", "warehouse",
+    }:
+        dimension_score += 0.10
+        dimension_evidence.append("table/file name suggests reference data")
     has_categorical_code = any(
         column.semantic_type == "categorical_code" for column in columns
     )
@@ -363,6 +361,10 @@ def _assign_table_roles(profiles: list[TableProfile]) -> None:
             profile.role_evidence = tuple(
                 (fact_evidence + dimension_evidence)[:4]
             )
+        profile.role_score_breakdown = {
+            "fact_score": round(fact_score, 3),
+            "dimension_score": round(dimension_score, 3),
+        }
 
 
 def _coerce_tables(tables: Any) -> list[LoadedTable]:
@@ -429,6 +431,7 @@ def profile_tables(
                 row_count=int(len(table.frame)),
                 column_count=int(len(table.frame.columns)),
                 columns=columns,
+                encoding=table.encoding,
                 entity_role=entity_role,
                 entity_role_confidence=entity_confidence,
                 entity_role_evidence=entity_evidence,
@@ -461,6 +464,18 @@ def _type_match(
 
     if left.numeric_parse_rate >= 0.90 and right.numeric_parse_rate >= 0.90:
         if left.is_key_like or right.is_key_like or name_score >= 20.0:
+            leading_zero_identifier = any(
+                re.match(r"^[+-]?0\d+$", sample.strip())
+                for column in (left, right)
+                for sample in column.sample_values
+            )
+            if leading_zero_identifier:
+                return _TypeMatch(
+                    True,
+                    12.0,
+                    "text",
+                    "numeric-looking identifiers preserve leading zeros",
+                )
             score = 15.0 if left_type == right_type else 12.0
             return _TypeMatch(True, score, "numeric", "both columns are numeric-compatible")
 
@@ -535,6 +550,175 @@ def _prefilter_column_pairs(
     return pairs[: config.maximum_prefiltered_pairs_per_table_pair]
 
 
+def _fallback_eligible_columns(
+    profile: TableProfile,
+    config: DiscoveryConfig,
+    *,
+    right_side: bool,
+) -> list[ColumnProfile]:
+    eligible = []
+    excluded_types = {"empty", "boolean", "date", "numeric_measure"}
+    for column in profile.columns:
+        if column.semantic_type in excluded_types or column.is_measure_like:
+            continue
+        if column.non_null_count < config.fallback_minimum_non_null_count:
+            continue
+        if column.unique_count < config.fallback_minimum_non_null_count:
+            continue
+        if right_side and column.unique_rate < config.fallback_minimum_right_uniqueness:
+            continue
+        name_candidate = "name" in column.semantic_tokens and column.unique_rate >= 0.98
+        if not (column.is_key_like or name_candidate):
+            continue
+        eligible.append(column)
+    eligible.sort(
+        key=lambda column: (
+            column.is_key_like,
+            column.unique_rate,
+            column.non_null_count,
+            column.column_name,
+        ),
+        reverse=True,
+    )
+    return eligible[: config.fallback_maximum_columns_per_table]
+
+
+def _fallback_type_match(
+    left: ColumnProfile,
+    right: ColumnProfile,
+    name_score: float,
+) -> _TypeMatch:
+    match = _type_match(left, right, name_score)
+    if match.compatible:
+        return match
+    if (
+        left.numeric_parse_rate >= 0.90
+        and right.numeric_parse_rate >= 0.90
+        and (left.is_key_like or right.is_key_like)
+    ):
+        return _TypeMatch(
+            True,
+            10.0,
+            "numeric",
+            "both columns contain numeric-compatible identifier values",
+        )
+    return match
+
+
+def _entity_role_consistent(left: ColumnProfile, right: ColumnProfile) -> bool:
+    left_direct = any(
+        evidence.startswith("column signal")
+        for evidence in left.entity_role_evidence
+    )
+    right_direct = any(
+        evidence.startswith("column signal")
+        for evidence in right.entity_role_evidence
+    )
+    if not (left_direct and right_direct):
+        return True
+    return left.entity_role == right.entity_role
+
+
+def _sample_match_rate(
+    left_frame: pd.DataFrame,
+    right_frame: pd.DataFrame,
+    left_column: str,
+    right_column: str,
+    comparison_kind: str,
+    sample_size: int,
+) -> float:
+    left_values = canonicalize_key_series(
+        left_frame[left_column].head(sample_size), comparison_kind
+    )
+    right_values = canonicalize_key_series(
+        right_frame[right_column].head(sample_size), comparison_kind
+    ).dropna()
+    valid_left = left_values.dropna()
+    if valid_left.empty or right_values.empty:
+        return 0.0
+    return float(valid_left.isin(set(right_values.unique())).mean())
+
+
+def _fallback_column_pairs(
+    left_profile: TableProfile,
+    right_profile: TableProfile,
+    left_frame: pd.DataFrame,
+    right_frame: pd.DataFrame,
+    regular_candidates: list[RelationshipCandidate],
+    config: DiscoveryConfig,
+    diagnostics: dict[str, Any],
+) -> list[tuple[ColumnProfile, ColumnProfile, NameMatch, _TypeMatch]]:
+    used_left = {
+        candidate.left_columns[0]
+        for candidate in regular_candidates
+        if len(candidate.left_columns) == 1 and not candidate.blocked
+    }
+    used_right = {
+        candidate.right_columns[0]
+        for candidate in regular_candidates
+        if len(candidate.right_columns) == 1 and not candidate.blocked
+    }
+    ranked = []
+    left_columns = _fallback_eligible_columns(
+        left_profile, config, right_side=False
+    )
+    right_columns = _fallback_eligible_columns(
+        right_profile, config, right_side=True
+    )
+    for left_column in left_columns:
+        for right_column in right_columns:
+            diagnostics["fallback_pairs_screened"] += 1
+            if (
+                left_column.column_name in used_left
+                or right_column.column_name in used_right
+            ):
+                continue
+            name_match = compare_column_names(
+                left_column.column_name, right_column.column_name
+            )
+            if name_match.score >= config.minimum_name_score:
+                continue
+            if not _entity_role_consistent(left_column, right_column):
+                continue
+            type_match = _fallback_type_match(
+                left_column, right_column, name_match.score
+            )
+            if not type_match.compatible:
+                continue
+            sample_rate = _sample_match_rate(
+                left_frame,
+                right_frame,
+                left_column.column_name,
+                right_column.column_name,
+                type_match.comparison_kind,
+                config.fallback_sample_size,
+            )
+            diagnostics["fallback_sample_comparisons"] += 1
+            if sample_rate < config.fallback_minimum_match_rate:
+                continue
+            ranked.append(
+                (
+                    sample_rate,
+                    right_column.unique_rate,
+                    type_match.score,
+                    left_column,
+                    right_column,
+                    name_match,
+                    type_match,
+                )
+            )
+    ranked.sort(
+        key=lambda item: (item[0], item[1], item[2], item[3].column_name, item[4].column_name),
+        reverse=True,
+    )
+    return [
+        (left, right, name, type_match)
+        for _, _, _, left, right, name, type_match in ranked[
+            : config.fallback_maximum_pairs_per_table_pair
+        ]
+    ]
+
+
 def _role_fit_score(left_role: str, right_role: str, right_is_smaller: bool) -> float:
     if left_role == "fact" and right_role == "dimension":
         return 10.0
@@ -553,6 +737,7 @@ def _score_candidate(
     safety: JoinSafetyAssessment,
     left_profile: TableProfile,
     right_profile: TableProfile,
+    fallback: bool = False,
 ) -> tuple[float, dict[str, float], str]:
     name_score = sum(match.score for match in name_matches) / len(name_matches)
     type_score = sum(match.score for match in type_matches) / len(type_matches)
@@ -577,14 +762,27 @@ def _score_candidate(
         penalty -= 10.0
     penalty = max(penalty, -30.0)
 
-    breakdown = {
-        "name_alignment": round(name_score, 2),
-        "type_compatibility": round(type_score, 2),
-        "value_overlap": round(value_score, 2),
-        "right_key_uniqueness": round(uniqueness_score, 2),
-        "table_role_fit": round(role_score, 2),
-        "safety_penalty": round(penalty, 2),
-    }
+    if fallback:
+        breakdown = {
+            "name_similarity": round(name_score, 2),
+            "value_overlap": round(value_score, 2),
+            "right_key_uniqueness": round(uniqueness_score, 2),
+            "type_compatibility": round(type_score, 2),
+            "row_growth_risk": -10.0 if safety.row_inflation else 0.0,
+            "entity_role_consistency": round(role_score, 2),
+            "other_safety_penalty": round(
+                penalty + (10.0 if safety.row_inflation else 0.0), 2
+            ),
+        }
+    else:
+        breakdown = {
+            "name_alignment": round(name_score, 2),
+            "type_compatibility": round(type_score, 2),
+            "value_overlap": round(value_score, 2),
+            "right_key_uniqueness": round(uniqueness_score, 2),
+            "table_role_fit": round(role_score, 2),
+            "safety_penalty": round(penalty, 2),
+        }
     score = round(max(0.0, min(100.0, sum(breakdown.values()))), 2)
 
     name_reasons = "; ".join(match.reason for match in name_matches)
@@ -598,6 +796,11 @@ def _score_candidate(
     )
     if penalty:
         explanation += f"; safety risks contribute {penalty:.1f} points"
+    if fallback:
+        explanation += (
+            "; column-name similarity is weak, but the actual values overlap "
+            "strongly; confirm whether they represent the same business identifier"
+        )
     explanation += "."
     return score, breakdown, explanation
 
@@ -610,10 +813,14 @@ def _make_candidate(
     name_matches: tuple[NameMatch, ...],
     type_matches: tuple[_TypeMatch, ...],
     safety: JoinSafetyAssessment,
+    fallback: bool = False,
+    fallback_maximum_confidence: float = 79.99,
 ) -> RelationshipCandidate:
     score, breakdown, explanation = _score_candidate(
-        name_matches, type_matches, safety, left_profile, right_profile
+        name_matches, type_matches, safety, left_profile, right_profile, fallback
     )
+    if fallback:
+        score = min(score, fallback_maximum_confidence)
     confidence_level = "high" if score >= 80 else "medium" if score >= 60 else "low"
     left_names = tuple(column.column_name for column in left_columns)
     right_names = tuple(column.column_name for column in right_columns)
@@ -652,7 +859,9 @@ def _make_candidate(
         fact_to_fact_risk=safety.fact_to_fact_risk,
         blocked=safety.blocked,
         block_reasons=safety.block_reasons,
-        risk_flags=safety.risk_flags,
+        risk_flags=(
+            safety.risk_flags + (("weak_name_high_value_overlap",) if fallback else ())
+        ),
     )
 
 
@@ -756,6 +965,7 @@ def _discover_table_pair(
             left_profile.entity_role,
             right_profile.entity_role,
         )
+        diagnostics["format_warnings"].extend(safety.format_warnings)
         if safety.match_rate < config.minimum_match_rate:
             continue
 
@@ -813,6 +1023,7 @@ def _discover_table_pair(
             left_profile.entity_role,
             right_profile.entity_role,
         )
+        diagnostics["format_warnings"].extend(safety.format_warnings)
         if safety.match_rate < config.minimum_match_rate:
             continue
         if safety.right_key_uniqueness < config.composite_minimum_right_uniqueness:
@@ -831,6 +1042,50 @@ def _discover_table_pair(
         )
         if candidate.confidence_score >= config.minimum_candidate_score:
             candidates.append(candidate)
+
+    fallback_pairs = _fallback_column_pairs(
+        left_profile,
+        right_profile,
+        left_table.frame,
+        right_table.frame,
+        candidates,
+        config,
+        diagnostics,
+    )
+    for left_column, right_column, name_match, type_match in fallback_pairs:
+        diagnostics["fallback_full_comparisons"] += 1
+        safety = evaluate_join_safety(
+            left_table.frame,
+            right_table.frame,
+            (left_column.column_name,),
+            (right_column.column_name,),
+            (type_match.comparison_kind,),
+            left_profile.role_guess,
+            right_profile.role_guess,
+            left_profile.entity_role,
+            right_profile.entity_role,
+        )
+        diagnostics["format_warnings"].extend(safety.format_warnings)
+        if safety.match_rate < config.fallback_minimum_match_rate:
+            continue
+        if safety.right_key_uniqueness < config.fallback_minimum_right_uniqueness:
+            continue
+        if safety.blocked or safety.fact_to_fact_risk or safety.row_inflation:
+            continue
+        candidate = _make_candidate(
+            left_profile,
+            right_profile,
+            (left_column,),
+            (right_column,),
+            (name_match,),
+            (type_match,),
+            safety,
+            fallback=True,
+            fallback_maximum_confidence=config.fallback_maximum_confidence,
+        )
+        if candidate.confidence_score >= config.minimum_candidate_score:
+            candidates.append(candidate)
+            diagnostics["fallback_candidate_count"] += 1
 
     return candidates
 
@@ -851,6 +1106,11 @@ def discover_relationships(
         "prefiltered_column_pairs": 0,
         "value_overlap_comparisons": 0,
         "composite_comparisons": 0,
+        "fallback_pairs_screened": 0,
+        "fallback_sample_comparisons": 0,
+        "fallback_full_comparisons": 0,
+        "fallback_candidate_count": 0,
+        "format_warnings": [],
         "candidate_count": 0,
         "blocked_candidate_count": 0,
         "merge_executed": False,

@@ -20,21 +20,14 @@ from standard_field_mapping import (
     recommend_standard_field_mappings,
 )
 from standard_field_models import StandardFieldSelection
+from ui_guidance import blocked_reason_key, render_blocked_reason, render_step_guide
+from ui_i18n import field_help, field_label, t
 
 
 BUTTON_SUPPORTS_ICON = "icon" in inspect.signature(st.button).parameters
 LARGE_ROW_WARNING = 500_000
 LARGE_COLUMN_WARNING = 200
 LARGE_MEMORY_WARNING_BYTES = 250 * 1024 * 1024
-
-STRATEGY_LABELS = {
-    "unmapped": "Not mapped",
-    "default_zero": "Default 0 (explicit business assumption)",
-    "not_provided": "Data not provided (keep as unknown)",
-    "not_applicable": "Not applicable to this business",
-    "omit": "Omit optional field",
-}
-
 
 def _button(label, icon=None, **kwargs):
     if icon and BUTTON_SUPPORTS_ICON:
@@ -44,7 +37,7 @@ def _button(label, icon=None, **kwargs):
 
 def _memory_text(memory_bytes):
     if memory_bytes is None:
-        return "n/a"
+        return t("common.not_available")
     value = float(memory_bytes)
     for unit in ("B", "KiB", "MiB", "GiB"):
         if value < 1024 or unit == "GiB":
@@ -78,8 +71,8 @@ def _decode_choice(choice):
 def _format_choice(choice):
     strategy, source = _decode_choice(choice)
     if strategy == "source":
-        return f"Map from source: {source}"
-    return STRATEGY_LABELS[strategy]
+        return t("strategy.source", source=source)
+    return t(f"strategy.{strategy}")
 
 
 def _choice_options(field, source_columns):
@@ -106,7 +99,12 @@ def _clear_mapping_output():
 
 
 def _choice_changed(field):
-    st.session_state[f"generic_mapping_confirm_{field}"] = False
+    choice = st.session_state.get(f"generic_mapping_choice_{field}")
+    strategy = _decode_choice(choice)[0] if choice else "unmapped"
+    st.session_state[f"generic_mapping_confirm_{field}"] = (
+        field in OPTIONAL_ANALYSIS_FIELDS
+        and strategy in {"not_provided", "not_applicable", "omit"}
+    )
     _clear_mapping_output()
 
 
@@ -116,10 +114,7 @@ def _recommendation_records(recommendations):
         if recommendation.recommended_strategy == "source":
             proposed = recommendation.recommended_source
         else:
-            proposed = STRATEGY_LABELS.get(
-                recommendation.recommended_strategy,
-                recommendation.recommended_strategy,
-            )
+            proposed = t(f"strategy.{recommendation.recommended_strategy}")
         records.append(
             {
                 "standard_field": recommendation.standard_field,
@@ -154,18 +149,15 @@ def _diagnostic_records(result):
 def _render_size_guard(frame):
     memory_bytes = int(frame.memory_usage(index=True, deep=True).sum())
     metrics = st.columns(3)
-    metrics[0].metric("Merged rows", f"{len(frame):,}")
-    metrics[1].metric("Merged columns", f"{len(frame.columns):,}")
-    metrics[2].metric("Estimated memory", _memory_text(memory_bytes))
+    metrics[0].metric(t("mapping.merged_rows"), f"{len(frame):,}")
+    metrics[1].metric(t("mapping.merged_columns"), f"{len(frame.columns):,}")
+    metrics[2].metric(t("mapping.memory"), _memory_text(memory_bytes))
     if (
         len(frame) >= LARGE_ROW_WARNING
         or len(frame.columns) >= LARGE_COLUMN_WARNING
         or memory_bytes >= LARGE_MEMORY_WARNING_BYTES
     ):
-        st.warning(
-            "This merged dataset is large. Recommendations use bounded samples and the "
-            "page displays only 20-row previews; conversion may still require additional memory."
-        )
+        st.warning(t("mapping.large_warning"))
 
 
 def _initialize_mapping_state(frame, source_entity_roles):
@@ -186,7 +178,11 @@ def _initialize_mapping_state(frame, source_entity_roles):
                 recommendation.recommended_source,
             )
         )
-        st.session_state[f"generic_mapping_confirm_{recommendation.standard_field}"] = False
+        st.session_state[f"generic_mapping_confirm_{recommendation.standard_field}"] = (
+            recommendation.standard_field in OPTIONAL_ANALYSIS_FIELDS
+            and recommendation.recommended_strategy
+            in {"not_provided", "not_applicable", "omit"}
+        )
     st.session_state["generic_mapping_extensions"] = []
 
 
@@ -195,12 +191,12 @@ def _render_field_choices(frame, recommendations, source_entity_roles):
     selections = []
     inference_records = []
 
-    for section_label, field_label, fields in (
-        ("Required transaction fields", "Required", REQUIRED_TRANSACTION_FIELDS),
-        ("Optional analysis fields", "Optional", OPTIONAL_ANALYSIS_FIELDS),
-        ("Business assumptions", "Assumption", BUSINESS_ASSUMPTION_FIELDS),
+    for section_key, field_type_key, fields in (
+        ("mapping.required_section", "common.required", REQUIRED_TRANSACTION_FIELDS),
+        ("mapping.optional_section", "common.optional", OPTIONAL_ANALYSIS_FIELDS),
+        ("mapping.assumption_section", "common.assumption", BUSINESS_ASSUMPTION_FIELDS),
     ):
-        st.markdown(f"#### {section_label}")
+        st.markdown(f"#### {t(section_key)}")
         for field in fields:
             recommendation = next(
                 item for item in recommendations if item.standard_field == field
@@ -218,23 +214,33 @@ def _render_field_choices(frame, recommendations, source_entity_roles):
 
             columns = st.columns([1.2, 3.8, 1.2])
             columns[0].markdown(
-                f"**{field}**  \n{field_label}"
+                f"**{field_label(field)}**  \n{t(field_type_key)}"
             )
+            columns[0].caption(field_help(field))
             columns[1].selectbox(
-                f"Mapping for {field}",
+                t("mapping.for_field", field=field_label(field)),
                 options,
                 format_func=_format_choice,
                 key=choice_key,
-                label_visibility="collapsed",
                 on_change=_choice_changed,
                 args=(field,),
             )
             strategy, source_column = _decode_choice(st.session_state[choice_key])
             active = strategy != "omit"
+            confirmation_not_required = (
+                field in OPTIONAL_ANALYSIS_FIELDS
+                and strategy in {"not_provided", "not_applicable", "omit"}
+            )
+            if confirmation_not_required:
+                st.session_state[confirm_key] = True
             columns[2].checkbox(
-                "Confirm",
+                (
+                    t("common.no_confirmation_needed")
+                    if confirmation_not_required
+                    else t("common.confirm")
+                ),
                 key=confirm_key,
-                disabled=not active,
+                disabled=not active or confirmation_not_required,
                 on_change=_clear_mapping_output,
             )
             confirmed = bool(st.session_state.get(confirm_key)) if active else True
@@ -261,7 +267,7 @@ def _render_field_choices(frame, recommendations, source_entity_roles):
                 explanation = recommendation.explanation
             else:
                 confidence = 0.0
-                explanation = "User-selected fallback strategy."
+                explanation = t("mapping.user_fallback")
             inference_records.append(
                 {
                     "standard_field": field,
@@ -311,7 +317,9 @@ def render_generic_standard_mapping(
     if not merge_result.success or frame is None:
         return
 
-    st.subheader("Standard Field Mapping")
+    render_step_guide(6)
+    st.subheader(t("mapping.title"))
+    st.write(t("mapping.intro"))
     _render_size_guard(frame)
     source_entity_roles = build_source_entity_role_map(
         discovery_result, merge_result.fact_table_id
@@ -319,37 +327,59 @@ def render_generic_standard_mapping(
     _initialize_mapping_state(frame, source_entity_roles)
     recommendations = st.session_state["generic_mapping_recommendations"]
 
-    with st.expander("Automatic mapping recommendations", expanded=True):
+    with st.expander(t("mapping.recommendations"), expanded=True):
         st.dataframe(
             pd.DataFrame(_recommendation_records(recommendations)),
             hide_index=True,
             use_container_width=True,
+            column_config={
+                "standard_field": t("mapping.column.standard_field"),
+                "required": t("mapping.column.required"),
+                "target_type": t("mapping.column.target_type"),
+                "recommended_source_or_strategy": t("mapping.column.recommendation"),
+                "confidence": t("common.confidence"),
+                "explanation": t("mapping.column.explanation"),
+            },
         )
-        st.caption(
-            "Recommendations are never approval. Confirm every required mapping or fallback explicitly."
-        )
+        st.caption(t("mapping.recommendation_notice"))
 
     selections, inference_records = _render_field_choices(
         frame,
         recommendations,
         source_entity_roles,
     )
-    st.markdown("#### Current mapping summary")
+    st.markdown(f"#### {t('mapping.current_summary')}")
     st.dataframe(
         pd.DataFrame(inference_records),
         hide_index=True,
         use_container_width=True,
+        column_config={
+            "standard_field": t("mapping.column.standard_field"),
+            "source_or_strategy": t("mapping.column.source_strategy"),
+            "inferred_confidence": t("common.confidence"),
+            "confirmed": t("table.column.confirmed"),
+            "explanation": t("mapping.column.explanation"),
+        },
     )
 
     live_errors, source_usage = _live_mapping_errors(selections)
+    required_confirmed = sum(
+        selection.strategy != "unmapped" and selection.confirmed
+        for selection in selections
+        if selection.standard_field in REQUIRED_TRANSACTION_FIELDS
+    )
+    st.info(
+        t(
+            "mapping.required_progress",
+            confirmed=required_confirmed,
+            total=len(REQUIRED_TRANSACTION_FIELDS),
+        )
+    )
     extension_columns = st.multiselect(
-        "Additional source columns to retain",
+        t("mapping.additional"),
         list(map(str, frame.columns)),
         key="generic_mapping_extensions",
-        help=(
-            "The unified dataset contains required fields, confirmed optional fields, "
-            "and only these explicitly retained extensions."
-        ),
+        help=t("mapping.additional_help"),
         on_change=_clear_mapping_output,
     )
     extension_conflicts = [
@@ -362,18 +392,23 @@ def render_generic_standard_mapping(
         )
 
     if live_errors:
-        with st.expander(f"Mapping checks ({len(live_errors)} incomplete)", expanded=False):
+        st.warning(t("mapping.incomplete", count=len(live_errors)))
+        with st.expander(t("mapping.checks", count=len(live_errors)), expanded=False):
             for error in live_errors:
-                st.warning(error)
+                st.warning(t("mapping.error_item", error=error))
 
+    mapping_block_reason = blocked_reason_key(
+        "generate_mapping", incomplete_count=len(live_errors)
+    )
+    render_blocked_reason(mapping_block_reason)
     generate_clicked = _button(
-        "Validate & Generate Unified Orders Preview",
+        t("mapping.generate"),
         icon=":material/check_circle:",
         key="generic_mapping_generate",
         disabled=bool(live_errors),
     )
     if generate_clicked:
-        with st.spinner("Validating conversions and generating a bounded preview..."):
+        with st.spinner(t("mapping.spinner")):
             invalidate_generic_report_state(st.session_state)
             st.session_state["generic_standard_mapping_result"] = generate_unified_orders(
                 frame,
@@ -387,11 +422,12 @@ def render_generic_standard_mapping(
     if result is None:
         return
 
-    st.subheader("Unified Orders Preview")
+    st.subheader(t("mapping.preview_title"))
+    st.caption(t("mapping.preview_explanation"))
     if result.success:
-        st.success("Standard field mapping passed.")
+        st.success(t("mapping.passed"))
     else:
-        st.error("Standard field mapping is blocked.")
+        st.error(t("mapping.blocked"))
     for error in result.errors:
         st.error(error)
     for warning in result.warnings:
@@ -403,17 +439,28 @@ def render_generic_standard_mapping(
             hide_index=True,
             use_container_width=True,
             column_config={
-                "null_rate": st.column_config.NumberColumn(format="percent")
+                "standard_field": t("mapping.column.standard_field"),
+                "source_or_strategy": t("mapping.column.source_strategy"),
+                "confidence": t("common.confidence"),
+                "conversion_failures": t("mapping.column.conversion_failures"),
+                "invalid_values": t("mapping.column.invalid_values"),
+                "null_values": t("mapping.column.null_values"),
+                "null_rate": st.column_config.NumberColumn(
+                    t("mapping.column.null_rate"), format="percent"
+                ),
+                "output_dtype": t("mapping.column.output_type"),
+                "status": t("common.status"),
+                "explanation": t("mapping.column.explanation"),
             },
         )
     if not result.success or result.unified_orders is None:
         return
 
     output_metrics = st.columns(4)
-    output_metrics[0].metric("Unified rows", f"{result.output_row_count:,}")
-    output_metrics[1].metric("Unified columns", f"{result.output_column_count:,}")
-    output_metrics[2].metric("Unified memory", _memory_text(result.output_memory_bytes))
-    output_metrics[3].metric("Preview rows", f"{min(20, result.output_row_count):,}")
+    output_metrics[0].metric(t("mapping.unified_rows"), f"{result.output_row_count:,}")
+    output_metrics[1].metric(t("mapping.unified_columns"), f"{result.output_column_count:,}")
+    output_metrics[2].metric(t("mapping.unified_memory"), _memory_text(result.output_memory_bytes))
+    output_metrics[3].metric(t("mapping.preview_rows"), f"{min(20, result.output_row_count):,}")
     st.dataframe(
         result.unified_orders.head(20),
         hide_index=True,

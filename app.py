@@ -9,12 +9,17 @@ from generic_report_generation import (
     get_field_availability_notes,
     get_field_availability_status,
     return_analysis_available,
-    return_analysis_unavailable_message,
 )
 from generic_store_analysis import (
     store_analysis_available,
     valid_store_summary,
 )
+from ui_guidance import (
+    render_glossary,
+    render_step_guide,
+    render_workflow_progress,
+)
+from ui_i18n import render_language_selector, t
 
 
 EXCEL_MIME_TYPE = (
@@ -44,6 +49,22 @@ def divide_safely(numerator, denominator):
         return 0
 
     return numerator / denominator
+
+
+def _customer_unavailable_display(report_tables):
+    status = get_field_availability_status(report_tables, "customer_id")
+    if status == "partially_provided":
+        return t("report.customer_partial")
+    if status == "mapping_conflict":
+        return get_field_availability_notes(report_tables, "customer_id")
+    return t("report.customer_not_provided")
+
+
+def _return_unavailable_display(report_tables):
+    status = get_field_availability_status(report_tables, "returned")
+    if status == "not_applicable":
+        return t("report.return_not_applicable")
+    return t("report.return_not_provided")
 
 
 def get_dashboard_metrics(report_tables):
@@ -97,26 +118,26 @@ def show_kpi_cards(report_tables):
     """Show the main KPI cards."""
     metrics = get_dashboard_metrics(report_tables)
 
-    st.subheader("Key Metrics")
+    st.subheader(t("report.key_metrics"))
     first_row = st.columns(4)
     first_row[0].metric(
-        "Total Final Revenue",
+        t("report.total_revenue"),
         format_money(metrics["total_revenue"]),
     )
-    first_row[1].metric("Total Orders", format_number(metrics["total_orders"]))
-    first_row[2].metric("Total Units", format_number(metrics["total_units"]))
-    first_row[3].metric("Overall AOV", format_money(metrics["overall_aov"]))
+    first_row[1].metric(t("report.total_orders"), format_number(metrics["total_orders"]))
+    first_row[2].metric(t("report.total_units"), format_number(metrics["total_units"]))
+    first_row[3].metric(t("report.aov"), format_money(metrics["overall_aov"]))
 
     secondary_metrics = [
-        ("Top Category", metrics["top_category"] or "N/A"),
-        ("Top Product", metrics["top_product"] or "N/A"),
+        (t("report.top_category"), metrics["top_category"] or t("common.not_available")),
+        (t("report.top_product"), metrics["top_product"] or t("common.not_available")),
     ]
     if customer_analysis_available(report_tables):
-        secondary_metrics.append(("Top Customer", metrics["top_customer"] or "N/A"))
+        secondary_metrics.append((t("report.top_customer"), metrics["top_customer"] or t("common.not_available")))
     if store_analysis_available(report_tables):
-        secondary_metrics.append(("Top Store", metrics["top_store"] or "N/A"))
+        secondary_metrics.append((t("report.top_store"), metrics["top_store"] or t("common.not_available")))
     secondary_metrics.append(
-        ("Anomaly Count", format_number(metrics["anomaly_count"]))
+        (t("report.anomalies"), format_number(metrics["anomaly_count"]))
     )
     for start in range(0, len(secondary_metrics), 4):
         row_metrics = secondary_metrics[start : start + 4]
@@ -140,10 +161,10 @@ def show_monthly_revenue_trend(report_tables):
     monthly = clean_time_axis(report_tables["monthly_summary"])
     anomalies = report_tables["anomalies"]
 
-    st.caption("Use this chart to spot revenue drops or spikes.")
+    st.caption(t("report.monthly_caption"))
 
     if monthly.empty:
-        st.info("Monthly revenue data is not available.")
+        st.info(t("report.no_monthly_data"))
         return
 
     hover_data = {
@@ -163,28 +184,28 @@ def show_monthly_revenue_trend(report_tables):
         x="year_month",
         y="revenue",
         markers=True,
-        title="Monthly Revenue Trend",
+        title=t("chart.monthly_revenue"),
         hover_data=hover_data,
     )
     fig.update_yaxes(tickprefix="$", separatethousands=True)
-    fig.update_layout(xaxis_title="Month", yaxis_title="Revenue")
+    fig.update_layout(xaxis_title=t("axis.month"), yaxis_title=t("axis.revenue"))
     st.plotly_chart(fig, use_container_width=True)
 
     if (
         not anomalies.empty
         and (anomalies["anomaly_type"] == "sales_drop_over_20_percent").any()
     ):
-        st.warning("One or more months had a revenue drop above 20%.")
+        st.warning(t("report.revenue_drop_warning"))
 
 
 def show_revenue_by_category(report_tables):
     """Show revenue grouped by category."""
     categories = report_tables["category_summary"].copy()
 
-    st.caption("Use this chart to see which category drives revenue.")
+    st.caption(t("report.category_caption"))
 
     if categories.empty:
-        st.info("Category revenue data is not available.")
+        st.info(t("report.no_category_data"))
         return
 
     categories = categories.sort_values("revenue", ascending=False)
@@ -192,7 +213,7 @@ def show_revenue_by_category(report_tables):
         categories,
         x="category",
         y="revenue",
-        title="Revenue by Category",
+        title=t("chart.category_revenue"),
         hover_data={
             "revenue": ":$,.2f",
             "orders": ":,",
@@ -205,7 +226,7 @@ def show_revenue_by_category(report_tables):
         categoryarray=categories["category"].tolist(),
     )
     fig.update_yaxes(tickprefix="$", separatethousands=True)
-    fig.update_layout(xaxis_title="Category", yaxis_title="Revenue")
+    fig.update_layout(xaxis_title=t("axis.category"), yaxis_title=t("axis.revenue"))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -213,10 +234,10 @@ def show_top_products_chart(report_tables):
     """Show top products by revenue."""
     products = report_tables["top_products"].copy()
 
-    st.caption("Use this chart to see which products contribute the most.")
+    st.caption(t("report.product_caption"))
 
     if products.empty:
-        st.info("Top product data is not available.")
+        st.info(t("report.no_product_data"))
         return
 
     products = products.sort_values("revenue", ascending=True)
@@ -225,7 +246,7 @@ def show_top_products_chart(report_tables):
         x="revenue",
         y="product_name",
         orientation="h",
-        title="Top Products by Revenue",
+        title=t("chart.top_products"),
         hover_data={
             "revenue": ":$,.2f",
             "orders": ":,",
@@ -234,7 +255,7 @@ def show_top_products_chart(report_tables):
         },
     )
     fig.update_xaxes(tickprefix="$", separatethousands=True)
-    fig.update_layout(xaxis_title="Revenue", yaxis_title="Product")
+    fig.update_layout(xaxis_title=t("axis.revenue"), yaxis_title=t("axis.product"))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -242,10 +263,10 @@ def show_top_customers_chart(report_tables):
     """Show top customers by revenue."""
     customers = report_tables["customer_summary"].head(10).copy()
 
-    st.caption("Use this chart to see which customers drive revenue.")
+    st.caption(t("report.customer_caption"))
 
     if customers.empty:
-        st.info("Top customer data is not available.")
+        st.info(t("report.no_customer_data"))
         return
 
     customers = customers.sort_values("revenue", ascending=True)
@@ -254,7 +275,7 @@ def show_top_customers_chart(report_tables):
         x="revenue",
         y="customer_name",
         orientation="h",
-        title="Top 10 Customers by Revenue",
+        title=t("chart.top_customers"),
         hover_data={
             "revenue": ":$,.2f",
             "orders": ":,",
@@ -263,7 +284,7 @@ def show_top_customers_chart(report_tables):
         },
     )
     fig.update_xaxes(tickprefix="$", separatethousands=True)
-    fig.update_layout(xaxis_title="Revenue", yaxis_title="Customer")
+    fig.update_layout(xaxis_title=t("axis.revenue"), yaxis_title=t("axis.customer"))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -275,13 +296,13 @@ def show_store_performance_chart(report_tables):
     if stores.empty:
         return
     if get_field_availability_status(report_tables, "store_analysis") == "partially_provided":
-        st.info(get_field_availability_notes(report_tables, "store_analysis"))
+        st.info(t("report.store_partial"))
     fig = px.bar(
         stores,
         x="revenue",
         y="store_name",
         orientation="h",
-        title="Store Performance by Revenue",
+        title=t("chart.store_revenue"),
         hover_data={
             "revenue": ":$,.2f",
             "orders": ":,",
@@ -291,7 +312,7 @@ def show_store_performance_chart(report_tables):
         },
     )
     fig.update_xaxes(tickprefix="$", separatethousands=True)
-    fig.update_layout(xaxis_title="Revenue", yaxis_title="Store")
+    fig.update_layout(xaxis_title=t("axis.revenue"), yaxis_title=t("axis.store"))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -299,17 +320,17 @@ def show_monthly_return_rate_chart(report_tables):
     """Show monthly return rate."""
     monthly = clean_time_axis(report_tables["monthly_summary"])
 
-    st.caption("Use this chart to spot months with elevated returns.")
+    st.caption(t("report.return_caption"))
 
     if monthly.empty:
-        st.info("Monthly return rate data is not available.")
+        st.info(t("report.no_return_data"))
         return
 
     fig = px.bar(
         monthly,
         x="year_month",
         y="return_rate",
-        title="Monthly Return Rate",
+        title=t("chart.monthly_returns"),
         hover_data={
             "return_rate": ":.1%",
             "orders": ":,",
@@ -318,21 +339,21 @@ def show_monthly_return_rate_chart(report_tables):
         },
     )
     fig.update_yaxes(tickformat=".0%")
-    fig.update_layout(xaxis_title="Month", yaxis_title="Return Rate")
+    fig.update_layout(xaxis_title=t("axis.month"), yaxis_title=t("axis.return_rate"))
     st.plotly_chart(fig, use_container_width=True)
 
     if (monthly["return_rate"] > 0.15).any():
-        st.warning("Months above 15% return rate may need review.")
+        st.warning(t("report.return_rate_warning"))
 
 
 def show_anomalies_by_type_chart(report_tables):
     """Show anomaly count grouped by anomaly type."""
     anomalies = report_tables["anomalies"]
 
-    st.caption("Use this chart to see what kind of issues were detected.")
+    st.caption(t("report.anomaly_caption"))
 
     if anomalies.empty:
-        st.info("No anomalies detected.")
+        st.info(t("report.no_anomalies"))
         return
 
     label_column = (
@@ -348,10 +369,10 @@ def show_anomalies_by_type_chart(report_tables):
         anomaly_counts,
         x=label_column,
         y="count",
-        title="Anomalies by Type",
+        title=t("chart.anomalies"),
         hover_data={"count": ":,"},
     )
-    fig.update_layout(xaxis_title="Anomaly Type", yaxis_title="Count")
+    fig.update_layout(xaxis_title=t("axis.anomaly_type"), yaxis_title=t("axis.count"))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -359,10 +380,10 @@ def show_income_expense_cash_flow_chart(report_tables):
     """Show income, expenses, and net cash flow over time."""
     cash_flow = clean_time_axis(report_tables["cash_flow_summary"])
 
-    st.caption("Use this chart to compare income, expenses, and cash flow.")
+    st.caption(t("report.cashflow_caption"))
 
     if cash_flow.empty:
-        st.info("Cash flow data is not available.")
+        st.info(t("report.no_cash_flow"))
         return
 
     cash_flow_long = cash_flow.melt(
@@ -372,9 +393,9 @@ def show_income_expense_cash_flow_chart(report_tables):
         value_name="amount",
     )
     metric_labels = {
-        "monthly_income": "Monthly Income",
-        "monthly_expenses": "Monthly Expenses",
-        "net_cash_flow": "Net Cash Flow",
+        "monthly_income": t("report.cashflow.income"),
+        "monthly_expenses": t("report.cashflow.expenses"),
+        "net_cash_flow": t("report.cashflow.net"),
     }
     cash_flow_long["metric"] = cash_flow_long["metric"].map(metric_labels)
 
@@ -384,11 +405,11 @@ def show_income_expense_cash_flow_chart(report_tables):
         y="amount",
         color="metric",
         markers=True,
-        title="Income vs Expenses vs Net Cash Flow",
+        title=t("chart.cash_flow"),
         hover_data={"amount": ":$,.2f"},
     )
     fig.update_yaxes(tickprefix="$", separatethousands=True)
-    fig.update_layout(xaxis_title="Month", yaxis_title="Amount", legend_title="")
+    fig.update_layout(xaxis_title=t("axis.month"), yaxis_title=t("axis.amount"), legend_title="")
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -396,10 +417,10 @@ def show_expenses_by_category_chart(report_tables):
     """Show expenses grouped by category."""
     expenses = report_tables["expense_category_breakdown"].copy()
 
-    st.caption("Use this chart to see where expenses are concentrated.")
+    st.caption(t("report.expense_caption"))
 
     if expenses.empty:
-        st.info("Expense category data is not available.")
+        st.info(t("report.no_expense_category"))
         return
 
     expenses = expenses.sort_values("total_expense", ascending=True)
@@ -408,7 +429,7 @@ def show_expenses_by_category_chart(report_tables):
         x="total_expense",
         y="expense_category",
         orientation="h",
-        title="Expenses by Category",
+        title=t("chart.expenses"),
         hover_data={
             "total_expense": ":$,.2f",
             "expense_count": ":,",
@@ -416,7 +437,7 @@ def show_expenses_by_category_chart(report_tables):
         },
     )
     fig.update_xaxes(tickprefix="$", separatethousands=True)
-    fig.update_layout(xaxis_title="Total Expense", yaxis_title="Expense Category")
+    fig.update_layout(xaxis_title=t("axis.amount"), yaxis_title=t("axis.expense_category"))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -424,7 +445,7 @@ def show_visual_dashboard(report_result):
     """Show Plotly charts for the main report dashboard."""
     report_tables = report_result["report_tables"]
 
-    st.subheader("Visual Dashboard")
+    st.subheader(t("report.visual_dashboard"))
 
     first_left, first_right = st.columns(2)
 
@@ -443,7 +464,7 @@ def show_visual_dashboard(report_result):
         if customer_analysis_available(report_tables):
             show_top_customers_chart(report_tables)
         else:
-            st.info(customer_analysis_unavailable_message(report_tables))
+            st.info(_customer_unavailable_display(report_tables))
 
     third_left, third_right = st.columns(2)
 
@@ -451,23 +472,23 @@ def show_visual_dashboard(report_result):
         if return_analysis_available(report_tables):
             show_monthly_return_rate_chart(report_tables)
         else:
-            st.info(return_analysis_unavailable_message(report_tables))
+            st.info(_return_unavailable_display(report_tables))
 
     with third_right:
         show_anomalies_by_type_chart(report_tables)
 
     if store_analysis_available(report_tables):
-        st.subheader("Store Analysis")
+        st.subheader(t("report.store_analysis"))
         show_store_performance_chart(report_tables)
 
     if not report_result["expenses_uploaded"]:
-        st.info("Expense file was not uploaded, so finance charts are skipped.")
+        st.info(t("report.finance_skipped"))
         return
 
     cash_flow = report_tables["cash_flow_summary"]
 
     if cash_flow.empty:
-        st.info("Finance charts are skipped because cash flow data is empty.")
+        st.info(t("report.no_cash_flow"))
         return
 
     finance_left, finance_right = st.columns(2)
@@ -491,40 +512,34 @@ def validation_checks_passed(report_tables):
 
 def show_what_happened(report_result):
     """Explain how the uploaded data became the report."""
-    st.subheader("What happened?")
+    st.subheader(t("report.what_happened"))
 
     report_tables = report_result["report_tables"]
     data_quality_report = report_tables["data_quality_report"]
     validation_status = (
-        "passed"
+        t("report.status_value.passed")
         if validation_checks_passed(report_tables)
-        else "not passed"
+        else t("report.status_value.not_passed")
     )
     required_columns_status = (
-        "present"
+        t("report.status_value.present")
         if not data_quality_report["missing_required_columns"]
-        else "missing"
+        else t("report.status_value.missing")
     )
     expense_status = (
-        "uploaded"
+        t("report.status_value.uploaded")
         if report_result["expenses_uploaded"]
-        else "not uploaded"
+        else t("report.status_value.not_uploaded")
     )
 
     lines = [
-        f"Original uploaded order rows: {report_result['original_row_count']:,}.",
-        (
-            f"Duplicate review: {report_result['duplicate_group_count']} "
-            f"duplicate groups involving {report_result['duplicate_row_count']} rows."
-        ),
-        (
-            f"Selected duplicate rows removed from temporary report input: "
-            f"{report_result['removed_row_count']:,}."
-        ),
-        f"Final rows used for calculation: {report_result['calculation_row_count']:,}.",
-        f"Required columns: {required_columns_status}.",
-        f"Validation checks: {validation_status}.",
-        f"Expense file: {expense_status}.",
+        t("report.process.original", count=f"{report_result['original_row_count']:,}"),
+        t("report.process.duplicates", groups=report_result["duplicate_group_count"], rows=report_result["duplicate_row_count"]),
+        t("report.process.removed", count=f"{report_result['removed_row_count']:,}"),
+        t("report.process.calculation", count=f"{report_result['calculation_row_count']:,}"),
+        t("report.process.required", status=required_columns_status),
+        t("report.process.validation", status=validation_status),
+        t("report.process.expenses", status=expense_status),
     ]
 
     for line in lines:
@@ -620,20 +635,38 @@ def make_data_limitations_table(report_result):
 
 def show_action_required(report_result):
     """Separate business issues from optional-data limitations."""
-    st.subheader("Business Issues Requiring Review")
+    st.subheader(t("report.business_issues"))
     action_table = make_action_required_table(report_result)
 
     if action_table.empty:
-        st.success("No business issues require review.")
+        st.success(t("report.no_business_issues"))
     else:
-        st.dataframe(action_table, hide_index=True, use_container_width=True)
+        st.dataframe(
+            action_table,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Issue": t("report.column.issue"),
+                "Severity": t("report.column.severity"),
+                "Business Impact": t("report.column.business_impact"),
+                "Suggested Action": t("report.column.suggested_action"),
+            },
+        )
 
-    st.subheader("Data Availability and Limitations")
+    st.subheader(t("report.limitations"))
     limitations = make_data_limitations_table(report_result)
     if limitations.empty:
-        st.success("No material data limitations were identified.")
+        st.success(t("report.no_limitations"))
     else:
-        st.dataframe(limitations, hide_index=True, use_container_width=True)
+        st.dataframe(
+            limitations,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Limitation": t("report.column.limitation"),
+                "Impact": t("report.column.impact"),
+            },
+        )
 
 
 def show_business_insights(report_tables):
@@ -644,10 +677,10 @@ def show_business_insights(report_tables):
     customers = report_tables["customer_summary"]
     anomalies = report_tables["anomalies"]
 
-    st.subheader("Business Insights")
+    st.subheader(t("report.insights"))
 
     if monthly.empty:
-        st.write("- Monthly insight was not generated.")
+        st.write(f"- {t('report.no_monthly')}")
         return
 
     complete_months = (
@@ -671,16 +704,20 @@ def show_business_insights(report_tables):
     stores = valid_store_summary(report_tables.get("store_summary"))
 
     if strongest_month is not None:
-        st.write(
-            f"- Strongest complete month: {strongest_month['year_month']} "
-            f"with {format_money(strongest_month['revenue'])} in revenue."
+        strongest_text = t(
+            "report.insight.strongest",
+            month=strongest_month["year_month"],
+            revenue=format_money(strongest_month["revenue"]),
         )
-        st.write(
-            f"- Weakest complete month: {weakest_month['year_month']} "
-            f"with {format_money(weakest_month['revenue'])} in revenue."
+        weakest_text = t(
+            "report.insight.weakest",
+            month=weakest_month["year_month"],
+            revenue=format_money(weakest_month["revenue"]),
         )
+        st.write(f"- {strongest_text}")
+        st.write(f"- {weakest_text}")
     else:
-        st.write("- No complete calendar month was available for ranking.")
+        st.write(f"- {t('report.no_complete_month')}")
 
     if "is_partial_period" in monthly.columns:
         for reason in monthly.loc[
@@ -690,43 +727,44 @@ def show_business_insights(report_tables):
 
     if top_category is not None:
         st.write(
-            f"- Top category: {top_category['category']} "
-            f"({format_money(top_category['revenue'])})."
+            f"- {t('report.insight.top_category', name=top_category['category'], revenue=format_money(top_category['revenue']))}"
         )
 
     if top_product is not None:
         st.write(
-            f"- Top product: {top_product['product_name']} "
-            f"({format_money(top_product['revenue'])})."
+            f"- {t('report.insight.top_product', name=top_product['product_name'], revenue=format_money(top_product['revenue']))}"
         )
 
     if top_customer is not None:
         st.write(
-            f"- Top customer: {top_customer['customer_name']} "
-            f"({format_money(top_customer['revenue'])})."
+            f"- {t('report.insight.top_customer', name=top_customer['customer_name'], revenue=format_money(top_customer['revenue']))}"
         )
 
     if len(stores) >= 2:
         top_store = stores.iloc[0]
         lowest_store = stores.iloc[-1]
-        st.write(
-            f"- Top store: {top_store['store_name']} "
-            f"({format_money(top_store['revenue'])}, "
-            f"{top_store['revenue_share']:.1%} of total revenue)."
+        top_store_text = t(
+            "report.insight.top_store",
+            name=top_store["store_name"],
+            revenue=format_money(top_store["revenue"]),
+            share=f"{top_store['revenue_share']:.1%}",
         )
-        st.write(
-            f"- Lowest-revenue store: {lowest_store['store_name']} "
-            f"({format_money(lowest_store['revenue'])})."
+        lowest_store_text = t(
+            "report.insight.lowest_store",
+            name=lowest_store["store_name"],
+            revenue=format_money(lowest_store["revenue"]),
         )
+        st.write(f"- {top_store_text}")
+        st.write(f"- {lowest_store_text}")
 
-    st.write(f"- Detected anomalies: {len(anomalies):,}.")
+    st.write(f"- {t('report.detected_anomalies', count=f'{len(anomalies):,}')}")
 
 
 def show_table_expander(title, table):
     """Show a detail table only when the user opens an expander."""
     with st.expander(title):
         if table.empty:
-            st.info("No rows to display.")
+            st.info(t("common.no_rows"))
         else:
             st.dataframe(table, hide_index=True, use_container_width=True)
 
@@ -745,42 +783,42 @@ def show_detail_tables(report_result):
         sort=False,
     )
 
-    st.subheader("Detail Tables")
-    show_table_expander("Monthly Summary", report_tables["monthly_summary"])
-    show_table_expander("Category Summary", report_tables["category_summary"])
-    show_table_expander("Top Products", report_tables["top_products"])
+    st.subheader(t("report.details"))
+    show_table_expander(t("detail.monthly"), report_tables["monthly_summary"])
+    show_table_expander(t("detail.category"), report_tables["category_summary"])
+    show_table_expander(t("detail.products"), report_tables["top_products"])
     if store_analysis_available(report_tables):
-        show_table_expander("Store Summary", report_tables["store_summary"])
+        show_table_expander(t("detail.store"), report_tables["store_summary"])
     if customer_analysis_available(report_tables):
-        show_table_expander("Top Customers", report_tables["customer_summary"])
+        show_table_expander(t("detail.customers"), report_tables["customer_summary"])
     show_table_expander(
-        "Duplicate Rows Detail",
+        t("detail.duplicates"),
         report_result["duplicate_rows_detail"],
     )
     anomaly_display = report_tables["anomalies"].drop(
         columns=["anomaly_type"], errors="ignore"
     )
-    show_table_expander("Anomalies", anomaly_display)
-    show_table_expander("Validation Report", report_tables["validation_report"])
-    show_table_expander("Data Quality Checks", data_quality_checks)
+    show_table_expander(t("detail.anomalies"), anomaly_display)
+    show_table_expander(t("detail.validation"), report_tables["validation_report"])
+    show_table_expander(t("detail.quality"), data_quality_checks)
     if "data_preparation_summary" in report_tables:
         show_table_expander(
-            "Data Preparation Summary",
+            t("detail.preparation"),
             report_tables["data_preparation_summary"],
         )
     if "field_availability" in report_tables:
         show_table_expander(
-            "Field Availability",
+            t("detail.availability"),
             report_tables["field_availability"],
         )
     if "report_coverage" in report_tables:
         show_table_expander(
-            "Report Coverage",
+            t("detail.coverage"),
             report_tables["report_coverage"],
         )
     if "excluded_rows_detail" in report_tables:
         show_table_expander(
-            "Excluded Rows Detail",
+            t("detail.excluded"),
             report_tables["excluded_rows_detail"],
         )
 
@@ -788,82 +826,83 @@ def show_detail_tables(report_result):
 def show_report_status(status, reason):
     """Display report status with a simple visual state."""
     if status == "ready":
-        message = f"{status}: {reason}"
+        message = f"{t('report.status.ready')}: {t('report.status.ready_message')}"
         st.success(message)
     elif status == "review_required":
-        message = (
-            "Report generated successfully, but some data quality warnings "
-            "need review."
-        )
+        message = f"{t('report.status.review_required')}: {t('report.status.review_message')}"
         st.warning(message)
-        st.caption(f"Reason: {reason}")
+        st.caption(f"{t('common.reason')}: {reason}")
     else:
-        message = f"{status}: {reason}"
+        message = f"{t('report.status.failed')}: {t('report.status.failed_message')}"
         st.error(message)
+        st.caption(f"{t('common.reason')}: {reason}")
 
 
 def show_report_dashboard(report_result):
     """Show the generated report dashboard and downloads."""
     st.divider()
+    render_step_guide(8)
+    with st.expander(t("report.read.title"), expanded=True):
+        st.markdown(t("report.read.body"))
     show_report_status(report_result["status"], report_result["reason"])
 
     if report_result["duplicate_group_count"]:
-        st.info(
-            f"Original uploaded data contained "
-            f"{report_result['duplicate_group_count']} duplicate groups involving "
-            f"{report_result['duplicate_row_count']} rows."
-        )
+        st.info(t(
+            "report.duplicate_notice",
+            groups=report_result["duplicate_group_count"],
+            rows=report_result["duplicate_row_count"],
+        ))
 
     if report_result["removed_row_count"]:
-        st.info(
-            f"{report_result['removed_row_count']} selected duplicate row(s) "
-            "were removed from the temporary report input. The original "
-            "uploaded file was not changed."
-        )
+        st.info(t("report.removed_notice", count=report_result["removed_row_count"]))
 
     if not report_result["expenses_uploaded"]:
-        st.info("Finance Analysis Skipped. Expense file was not uploaded.")
+        st.info(t("report.finance_skipped"))
 
     if report_result.get("report_kind") == "generic":
-        st.subheader("Data Preparation Summary")
+        st.subheader(t("report.data_preparation"))
         st.dataframe(
             report_result["data_preparation_summary"].astype("string"),
             hide_index=True,
             use_container_width=True,
+            column_config={
+                "section": t("table.column.section"),
+                "item": t("table.column.item"),
+                "value": t("table.column.value"),
+                "notes": t("table.column.notes"),
+            },
         )
         if "report_coverage" in report_result["report_tables"]:
-            st.subheader("Report Coverage")
+            st.subheader(t("report.coverage"))
             st.dataframe(
                 report_result["report_tables"]["report_coverage"],
                 hide_index=True,
                 use_container_width=True,
+                column_config={
+                    "analysis": t("coverage.column.analysis"),
+                    "coverage_status": t("coverage.column.status"),
+                    "notes": t("table.column.notes"),
+                },
             )
         if report_result.get("excluded_row_count"):
-            st.warning(
-                f"{report_result['excluded_row_count']:,} row(s) were explicitly "
-                "excluded from all report calculations."
-            )
+            st.warning(t(
+                "report.excluded_notice",
+                count=f"{report_result['excluded_row_count']:,}",
+            ))
         if report_result.get("monthly_analysis_excluded_row_count"):
-            st.warning(
-                f"{report_result['monthly_analysis_excluded_row_count']:,} row(s) "
-                "with invalid dates were excluded from monthly analysis only."
-            )
-        if (
-            get_field_availability_status(
-                report_result["report_tables"], "returned"
-            )
-            == "not_provided"
-        ):
-            st.info(return_analysis_unavailable_message(report_result["report_tables"]))
-            st.caption(
-                "Return adjustments were not applied because return status was unavailable."
-            )
+            st.warning(t(
+                "report.monthly_excluded_notice",
+                count=f"{report_result['monthly_analysis_excluded_row_count']:,}",
+            ))
+        returned_status = get_field_availability_status(
+            report_result["report_tables"], "returned"
+        )
+        if returned_status in {"not_provided", "not_applicable"}:
+            st.info(_return_unavailable_display(report_result["report_tables"]))
+            if returned_status == "not_provided":
+                st.caption(t("report.return_adjustments_skipped"))
         if not customer_analysis_available(report_result["report_tables"]):
-            st.info(
-                customer_analysis_unavailable_message(
-                    report_result["report_tables"]
-                )
-            )
+            st.info(_customer_unavailable_display(report_result["report_tables"]))
 
     show_kpi_cards(report_result["report_tables"])
     show_visual_dashboard(report_result)
@@ -872,16 +911,13 @@ def show_report_dashboard(report_result):
     show_business_insights(report_result["report_tables"])
     show_detail_tables(report_result)
 
-    st.subheader("Downloads")
-    st.caption(
-        "Excel contains detailed sheets for audit and further analysis. The "
-        "dashboard above is the recommended place to review the report."
-    )
+    st.subheader(t("report.downloads"))
+    st.caption(t("report.download_help"))
     download_columns = st.columns(2)
 
     with download_columns[0]:
         st.download_button(
-            "Download Excel Report",
+            t("report.download_excel"),
             data=report_result["excel_bytes"],
             file_name="sales_report.xlsx",
             mime=EXCEL_MIME_TYPE,
@@ -889,7 +925,7 @@ def show_report_dashboard(report_result):
 
     with download_columns[1]:
         st.download_button(
-            "Download Markdown Summary",
+            t("report.download_markdown"),
             data=report_result["summary_text"],
             file_name="summary.md",
             mime="text/markdown",
@@ -898,13 +934,12 @@ def show_report_dashboard(report_result):
 
 st.set_page_config(page_title="Sales Report Generator", layout="wide")
 
-st.title("Upload Sales Data")
-st.write(
-    "Upload one or more CSV/XLSX files containing sales, orders, products, "
-    "customers, stores, or related business data. The system will identify "
-    "how the data is organized and guide the user through the required steps."
-)
+render_language_selector()
+st.title(t("app.title"))
+st.write(t("app.intro"))
+render_workflow_progress()
 
 report_result = render_generic_relationship_mode()
 if report_result is not None:
     show_report_dashboard(report_result)
+render_glossary()

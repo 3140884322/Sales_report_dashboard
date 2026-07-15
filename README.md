@@ -23,6 +23,43 @@ relationships and waits for the user to approve, edit, or reject them before
 performing safe many-to-one merges. Both paths then use the same field mapping,
 preflight, dashboard, Excel, and Markdown report flow.
 
+## Language Support / 语言支持
+
+The Streamlit interface supports **中文** and **English** from the
+`语言 / Language` selector at the top of the page. Chinese is the default.
+Switching language changes only display text: uploaded files, relationship
+decisions, field mappings, preflight state, internal standard field names,
+calculation rules, Excel sheet names, and output schemas are unchanged.
+
+User-uploaded file names, source column names, and cell values are always shown
+as provided and are not translated.
+
+Suggested documentation screenshot locations:
+
+```text
+docs/screenshots/guided-workflow-zh.png
+docs/screenshots/guided-workflow-en.png
+```
+
+## Guided Workflow / 引导式操作流程
+
+The page keeps an eight-step progress panel visible above data preparation.
+Each active stage explains its goal, the action required from the user,
+completion criteria, and the next step.
+
+1. **Upload Data / 上传数据**: upload one or more CSV/XLSX files.
+2. **Review Tables / 检查数据表**: verify files, sheets, row counts, and system suggestions.
+3. **Select Main Transaction Table / 选择主交易表**: choose the sales or order-detail table; a single table is selected automatically.
+4. **Review Relationships / 确认表关系**: approve, edit, or reject suggested connections for multi-table data.
+5. **Safe Merge / 安全合并**: build the approved plan and execute validated many-to-one joins.
+6. **Field Mapping / 字段映射**: map source columns to stable report fields and confirm assumptions.
+7. **Preflight Review / 数据预检**: review critical issues, warnings, exclusions, coverage, and optional expenses.
+8. **Generate Report / 生成报告**: create the dashboard, Excel workbook, and Markdown summary.
+
+For a one-table upload, relationship review and safe merge are explicitly
+shown as skipped because no table connection is required. Disabled plan,
+merge, mapping, and report buttons display the current blocking reason.
+
 ## Input Files
 
 Default input files:

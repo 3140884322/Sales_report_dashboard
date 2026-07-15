@@ -6,6 +6,9 @@ import pandas as pd
 
 
 MINIMUM_ORDER_GRAIN_MATCH_RATE = 0.20
+NULL_KEY_TOKENS = frozenset({"", "nan", "none", "null", "<na>", "nat"})
+ZERO_WIDTH_PATTERN = r"[\u200b\u200c\u200d\ufeff]"
+FORMAT_DIAGNOSTIC_SAMPLE_SIZE = 5_000
 
 
 @dataclass(frozen=True)
@@ -28,16 +31,23 @@ class JoinSafetyAssessment:
     blocked: bool
     block_reasons: tuple[str, ...]
     risk_flags: tuple[str, ...]
+    format_warnings: tuple[str, ...]
+
+
+def _normalize_text_key_series(series: pd.Series) -> pd.Series:
+    values = series.astype("string").str.normalize("NFKC")
+    values = values.str.replace(ZERO_WIDTH_PATTERN, "", regex=True)
+    values = values.str.replace("\u00a0", " ", regex=False)
+    values = values.str.replace(r"\s+", " ", regex=True).str.strip().str.casefold()
+    return values.mask(values.isin(NULL_KEY_TOKENS))
 
 
 def canonicalize_key_series(series: pd.Series, comparison_kind: str) -> pd.Series:
     """Return a normalized copy used for relationship comparison and safe joins."""
+    values = _normalize_text_key_series(series)
     if comparison_kind == "date":
-        parsed = pd.to_datetime(series, errors="coerce", format="mixed")
+        parsed = pd.to_datetime(values, errors="coerce", format="mixed")
         return parsed.dt.normalize().dt.strftime("%Y-%m-%d").astype("string")
-
-    values = series.astype("string").str.strip()
-    values = values.mask(values.eq(""))
 
     if comparison_kind == "numeric":
         cleaned = values.str.replace(",", "", regex=False)
@@ -47,7 +57,31 @@ def canonicalize_key_series(series: pd.Series, comparison_kind: str) -> pd.Serie
         )
         return normalized.astype("string")
 
-    return values.str.casefold()
+    return values
+
+
+def _leading_zero_format_warning(
+    left: pd.Series,
+    right: pd.Series,
+) -> str | None:
+    left_sample = left.dropna().head(FORMAT_DIAGNOSTIC_SAMPLE_SIZE)
+    right_sample = right.dropna().head(FORMAT_DIAGNOSTIC_SAMPLE_SIZE)
+    left_text = canonicalize_key_series(left_sample, "text").dropna()
+    right_text = canonicalize_key_series(right_sample, "text").dropna()
+    combined = pd.concat([left_text, right_text], ignore_index=True)
+    if not combined.str.match(r"^[+-]?0\d+$", na=False).any():
+        return None
+
+    left_numeric = canonicalize_key_series(left_sample, "numeric").dropna()
+    right_numeric = canonicalize_key_series(right_sample, "numeric").dropna()
+    text_overlap = set(left_text.unique()).intersection(right_text.unique())
+    numeric_overlap = set(left_numeric.unique()).intersection(right_numeric.unique())
+    if len(numeric_overlap) <= len(text_overlap):
+        return None
+    return (
+        "Key formats may differ because leading zeros are present; values such as "
+        "'001' and '1' were not treated as the same text identifier."
+    )
 
 
 def _canonicalize_keys(
@@ -147,6 +181,15 @@ def evaluate_join_safety(
     )
     block_reasons: list[str] = []
     risk_flags: list[str] = []
+    format_warnings = tuple(
+        warning
+        for left_column, right_column in zip(left_columns, right_columns)
+        if (warning := _leading_zero_format_warning(
+            left[left_column], right[right_column]
+        ))
+    )
+    if format_warnings:
+        risk_flags.append("key_format_mismatch")
 
     if right_null_key_count:
         risk_flags.append("right_key_nulls")
@@ -203,4 +246,5 @@ def evaluate_join_safety(
         blocked=bool(block_reasons),
         block_reasons=tuple(block_reasons),
         risk_flags=tuple(risk_flags),
+        format_warnings=format_warnings,
     )

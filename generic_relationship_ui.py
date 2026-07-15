@@ -27,13 +27,16 @@ from relationship_discovery import (
     discover_relationships_from_sources,
     evaluate_relationship_candidate,
 )
+from ui_guidance import (
+    blocked_reason_key,
+    render_blocked_reason,
+    render_step_guide,
+)
+from ui_i18n import t
 
 
 BUTTON_SUPPORTS_ICON = "icon" in inspect.signature(st.button).parameters
-SINGLE_TABLE_ROUTE_MESSAGE = (
-    "One table was detected. No table relationships are required. "
-    "Continue to field mapping."
-)
+SINGLE_TABLE_ROUTE_MESSAGE = t("single.detected", "en")
 
 
 def _button(label, icon=None, **kwargs):
@@ -56,7 +59,7 @@ def _format_table(discovery_result, table_id):
     profile = _table_profile_by_id(discovery_result)[table_id]
     return (
         f"{profile.table_name} | {profile.role_guess} | "
-        f"{profile.row_count:,} rows"
+        f"{profile.row_count:,} {t('common.rows')}"
     )
 
 
@@ -75,27 +78,50 @@ def _candidate_title(candidate):
 
 def _render_candidate_metrics(candidate):
     metrics = st.columns(4)
-    metrics[0].metric("Confidence", f"{candidate.confidence_score:.2f}")
-    metrics[1].metric("Match rate", f"{candidate.match_rate:.2%}")
+    metrics[0].metric(t("common.confidence"), f"{candidate.confidence_score:.2f}")
+    metrics[1].metric(t("common.match_rate"), f"{candidate.match_rate:.2%}")
     metrics[2].metric(
-        "Right key uniqueness", f"{candidate.right_key_uniqueness:.2%}"
+        t("relationship.right_uniqueness"), f"{candidate.right_key_uniqueness:.2%}"
     )
-    metrics[3].metric("Expected join", candidate.expected_join_type)
+    metrics[3].metric(t("relationship.expected_join"), candidate.expected_join_type)
 
     breakdown = pd.DataFrame(
         [
-            {"component": component, "points": points}
+            {"component": t(f"score.{component}"), "points": points}
             for component, points in candidate.score_breakdown.items()
         ]
     )
-    st.dataframe(breakdown, hide_index=True, use_container_width=True)
+    st.dataframe(
+        breakdown,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "component": t("relationship.breakdown.component"),
+            "points": t("relationship.breakdown.points"),
+        },
+    )
     st.write(candidate.explanation)
+    if "weak_name_high_value_overlap" in candidate.risk_flags:
+        st.info(t("relationship.fallback.explanation"))
+    if "key_format_mismatch" in candidate.risk_flags:
+        st.warning(t("relationship.format_warning"))
+    if candidate.blocked:
+        st.info(t("relationship.advice.blocked"))
+    elif candidate.confidence_score >= 80 and candidate.match_rate >= 0.8:
+        st.info(t("relationship.advice.approve"))
+    elif candidate.confidence_score >= 60:
+        st.info(t("relationship.advice.review"))
+    else:
+        st.info(t("relationship.advice.other"))
 
     if candidate.risk_flags:
-        st.warning("Risk flags: " + ", ".join(candidate.risk_flags))
+        flags = ", ".join(
+            t(f"risk.{flag}") for flag in candidate.risk_flags
+        )
+        st.warning(t("relationship.risk_flags", flags=flags))
     if candidate.block_reasons:
         for reason in candidate.block_reasons:
-            st.error(reason)
+            st.error(t("relationship.block_reason", reason=reason))
 
 
 def _set_decision(original_candidate_id, decision):
@@ -110,15 +136,15 @@ def _render_decision_status(candidate):
         candidate.candidate_id
     )
     if decision is None:
-        st.caption("Decision: Pending")
+        st.caption(t("relationship.decision.pending"))
     elif decision.status == "approved":
-        label = "Approved (edited)" if decision.edited else "Approved"
-        st.success(f"Decision: {label}")
+        key = "relationship.decision.approved_edited" if decision.edited else "relationship.decision.approved"
+        st.success(t(key))
     elif decision.status == "rejected":
-        label = "Rejected (edited)" if decision.edited else "Rejected"
-        st.warning(f"Decision: {label}")
+        key = "relationship.decision.rejected_edited" if decision.edited else "relationship.decision.rejected"
+        st.warning(t(key))
     else:
-        st.caption("Decision: Edited, pending explicit approval")
+        st.caption(t("relationship.decision.edited_pending"))
 
 
 def _select_index(options, value):
@@ -127,10 +153,10 @@ def _select_index(options, value):
 
 def _render_relationship_editor(discovery_result, original_candidate):
     token = _widget_token(original_candidate.candidate_id)
-    st.markdown("##### Edit relationship")
+    st.markdown(f"##### {t('relationship.editor.title')}")
     table_ids = [profile.table_id for profile in discovery_result.table_profiles]
     left_table_id = st.selectbox(
-        "Left table",
+        t("relationship.editor.left_table"),
         table_ids,
         index=_select_index(table_ids, original_candidate.left_table_id),
         format_func=lambda value: _format_table(discovery_result, value),
@@ -138,17 +164,17 @@ def _render_relationship_editor(discovery_result, original_candidate):
     )
     right_options = [table_id for table_id in table_ids if table_id != left_table_id]
     right_table_id = st.selectbox(
-        "Right table",
+        t("relationship.editor.right_table"),
         right_options,
         index=_select_index(right_options, original_candidate.right_table_id),
         format_func=lambda value: _format_table(discovery_result, value),
         key=f"generic_edit_{token}_{left_table_id}_right_table",
     )
     key_size = st.radio(
-        "Key size",
+        t("relationship.editor.key_size"),
         [1, 2],
         index=0 if len(original_candidate.left_columns) == 1 else 1,
-        format_func=lambda value: "Single column" if value == 1 else "Two-column composite",
+        format_func=lambda value: t("relationship.editor.single") if value == 1 else t("relationship.editor.composite"),
         horizontal=True,
         key=f"generic_edit_{token}_key_size",
     )
@@ -178,10 +204,10 @@ def _render_relationship_editor(discovery_result, original_candidate):
         columns = st.columns(2)
         selected_left.append(
             columns[0].selectbox(
-                f"Left key {index + 1}",
+                t("relationship.editor.left_key", number=index + 1),
                 left_options,
                 index=_select_index(left_options, default_left),
-                placeholder="Select a left column",
+                placeholder=t("relationship.editor.select_left"),
                 key=(
                     f"generic_edit_{token}_{left_table_id}_{key_size}_"
                     f"left_column_{index}"
@@ -190,10 +216,10 @@ def _render_relationship_editor(discovery_result, original_candidate):
         )
         selected_right.append(
             columns[1].selectbox(
-                f"Right key {index + 1}",
+                t("relationship.editor.right_key", number=index + 1),
                 right_column_options,
                 index=_select_index(right_column_options, default_right),
-                placeholder="Select a right column",
+                placeholder=t("relationship.editor.select_right"),
                 key=(
                     f"generic_edit_{token}_{right_table_id}_{key_size}_"
                     f"right_column_{index}"
@@ -204,14 +230,14 @@ def _render_relationship_editor(discovery_result, original_candidate):
     action_columns = st.columns(2)
     with action_columns[0]:
         recalculate = _button(
-            "Recalculate score & safety",
+            t("relationship.editor.recalculate"),
             icon=":material/calculate:",
             key=f"generic_edit_{token}_recalculate",
             use_container_width=True,
         )
     with action_columns[1]:
         close_editor = _button(
-            "Close editor",
+            t("relationship.editor.close"),
             icon=":material/close:",
             key=f"generic_edit_{token}_close",
             use_container_width=True,
@@ -248,13 +274,13 @@ def _render_relationship_editor(discovery_result, original_candidate):
     if edited_candidate is None:
         return
 
-    st.markdown("##### Recalculated candidate")
+    st.markdown(f"##### {t('relationship.editor.recalculated')}")
     st.write(_candidate_title(edited_candidate))
     _render_candidate_metrics(edited_candidate)
     approve_columns = st.columns(2)
     with approve_columns[0]:
         approve_edited = _button(
-            "Approve edited",
+            t("relationship.editor.approve"),
             icon=":material/check:",
             key=f"generic_edit_{token}_approve_edited",
             disabled=edited_candidate.blocked,
@@ -262,7 +288,7 @@ def _render_relationship_editor(discovery_result, original_candidate):
         )
     with approve_columns[1]:
         reject_edited = _button(
-            "Reject edited",
+            t("relationship.editor.reject"),
             icon=":material/close:",
             key=f"generic_edit_{token}_reject_edited",
             use_container_width=True,
@@ -305,7 +331,7 @@ def _render_candidate(discovery_result, candidate, embedded=False):
         actions = st.columns(3)
         with actions[0]:
             approve_clicked = _button(
-                "Approve",
+                t("relationship.approve"),
                 icon=":material/check:",
                 key=f"generic_candidate_{token}_approve",
                 disabled=candidate.blocked,
@@ -313,14 +339,14 @@ def _render_candidate(discovery_result, candidate, embedded=False):
             )
         with actions[1]:
             edit_clicked = _button(
-                "Edit",
+                t("relationship.edit"),
                 icon=":material/edit:",
                 key=f"generic_candidate_{token}_edit",
                 use_container_width=True,
             )
         with actions[2]:
             reject_clicked = _button(
-                "Reject",
+                t("relationship.reject"),
                 icon=":material/close:",
                 key=f"generic_candidate_{token}_reject",
                 use_container_width=True,
@@ -368,21 +394,21 @@ def _render_candidate_groups(discovery_result):
     ]
     blocked = [candidate for candidate in relationships if candidate.blocked]
 
-    st.markdown(f"#### Recommended ({len(recommended)})")
+    st.markdown(f"#### {t('relationships.recommended', count=len(recommended))}")
     for candidate in recommended:
         _render_candidate(discovery_result, candidate)
 
-    st.markdown(f"#### Needs Review ({len(needs_review)})")
+    st.markdown(f"#### {t('relationships.needs_review', count=len(needs_review))}")
     for candidate in needs_review:
         _render_candidate(discovery_result, candidate)
 
-    with st.expander(f"Other Candidates ({len(other)})", expanded=False):
+    with st.expander(t("relationships.other", count=len(other)), expanded=False):
         for index, candidate in enumerate(other):
             if index:
                 st.divider()
             _render_candidate(discovery_result, candidate, embedded=True)
 
-    st.markdown(f"#### Blocked ({len(blocked)})")
+    st.markdown(f"#### {t('relationships.blocked', count=len(blocked))}")
     for candidate in blocked:
         _render_candidate(discovery_result, candidate)
 
@@ -393,10 +419,15 @@ def _table_profile_records(discovery_result):
             "table": profile.table_name,
             "source": profile.source_name,
             "sheet": profile.sheet_name or "",
+            "encoding": profile.encoding or "",
             "rows": profile.row_count,
             "columns": profile.column_count,
             "role": profile.role_guess,
             "role_confidence": profile.role_confidence,
+            "role_score_breakdown": ", ".join(
+                f"{key}={value:.3f}"
+                for key, value in profile.role_score_breakdown.items()
+            ),
             "entity_role": profile.entity_role,
             "entity_confidence": profile.entity_role_confidence,
         }
@@ -471,14 +502,15 @@ def _render_single_table_route(discovery_result):
         st.session_state["generic_approved_plan"] = plan
         st.session_state["generic_merge_result"] = merge_result
 
-    st.info(SINGLE_TABLE_ROUTE_MESSAGE)
+    render_step_guide(3)
+    st.info(t("single.detected"))
     route_metrics = st.columns(3)
-    route_metrics[0].metric("Main transaction table", table.table_name)
-    route_metrics[1].metric("Rows", f"{len(table.frame):,}")
-    route_metrics[2].metric("Confirmed relationships", "0")
+    route_metrics[0].metric(t("single.main_table"), table.table_name)
+    route_metrics[1].metric(t("common.rows"), f"{len(table.frame):,}")
+    route_metrics[2].metric(t("single.relationship_count"), "0")
 
     if not merge_result.success or merge_result.merged_frame is None:
-        st.error(merge_result.error_message or "Single-table preparation failed.")
+        st.error(merge_result.error_message or t("single.failed"))
         return None
 
     return render_generic_standard_mapping(
@@ -494,16 +526,21 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
     approved_count = sum(
         decision.status == "approved" for decision in decisions.values()
     )
-    st.subheader("Approved Join Plan")
-    st.write(f"Explicitly approved relationships: {approved_count}")
+    render_step_guide(5)
+    st.subheader(t("plan.title"))
+    st.write(t("plan.count", count=approved_count))
+    st.info(t("plan.explanation"))
+    build_reason = blocked_reason_key(
+        "build_plan",
+        fact_selected=bool(fact_table_id),
+        approved_count=approved_count,
+    )
+    render_blocked_reason(build_reason)
     build_clicked = _button(
-        "Build Approved Join Plan",
+        t("plan.build"),
         icon=":material/account_tree:",
         key="generic_build_approved_plan",
-        disabled=(
-            not fact_table_id
-            or (approved_count == 0 and len(discovery_result.tables) > 1)
-        ),
+        disabled=bool(build_reason),
     )
     if build_clicked:
         try:
@@ -522,10 +559,18 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
 
     plan_errors = st.session_state.get("generic_plan_error", ())
     for error in plan_errors:
-        st.error(error)
+        st.error(t("plan.error", error=error))
 
     plan = st.session_state.get("generic_approved_plan")
     if plan is None:
+        merge_reason = blocked_reason_key("execute_merge", plan_ready=False)
+        render_blocked_reason(merge_reason)
+        _button(
+            t("merge.execute"),
+            icon=":material/play_arrow:",
+            key="generic_execute_safe_merge_disabled",
+            disabled=True,
+        )
         return
 
     st.dataframe(
@@ -533,17 +578,26 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
         hide_index=True,
         use_container_width=True,
         column_config={
-            "match_rate": st.column_config.NumberColumn(format="percent"),
-            "right_key_uniqueness": st.column_config.NumberColumn(format="percent"),
+            "step": t("table.column.step"),
+            "relationship": t("table.column.relationship"),
+            "confidence": t("common.confidence"),
+            "match_rate": st.column_config.NumberColumn(
+                t("common.match_rate"), format="percent"
+            ),
+            "right_key_uniqueness": st.column_config.NumberColumn(
+                t("relationship.right_uniqueness"), format="percent"
+            ),
+            "expected_join": t("relationship.expected_join"),
+            "edited": t("table.column.edited"),
         },
     )
     execute_clicked = _button(
-        "Execute Safe Merge",
+        t("merge.execute"),
         icon=":material/play_arrow:",
         key="generic_execute_safe_merge",
     )
     if execute_clicked:
-        with st.spinner("Executing approved many-to-one joins..."):
+        with st.spinner(t("merge.spinner")):
             invalidate_generic_mapping_state(st.session_state)
             st.session_state["generic_merge_result"] = execute_approved_join_plan(
                 discovery_result, plan
@@ -554,24 +608,38 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
     if merge_result is None:
         return
 
-    st.subheader("Merge Execution Summary")
+    st.subheader(t("merge.title"))
     if merge_result.success:
-        st.success("Approved join plan completed without row growth.")
+        st.success(t("merge.success"))
     else:
-        st.error(merge_result.error_message)
+        st.error(t("merge.error", error=merge_result.error_message))
+    st.caption(t("merge.explanation"))
     st.dataframe(
         pd.DataFrame(_diagnostic_records(merge_result)),
         hide_index=True,
         use_container_width=True,
-        column_config={"match_rate": st.column_config.NumberColumn(format="percent")},
+        column_config={
+            "step": t("table.column.step"),
+            "right_table": t("table.column.right_table"),
+            "rows_before": t("table.column.rows_before"),
+            "rows_after": t("table.column.rows_after"),
+            "matched_rows": t("table.column.matched_rows"),
+            "unmatched_rows": t("table.column.unmatched_rows"),
+            "match_rate": st.column_config.NumberColumn(
+                t("common.match_rate"), format="percent"
+            ),
+            "row_growth": t("table.column.row_growth"),
+            "validation_status": t("table.column.validation"),
+            "error": t("table.column.error"),
+        },
     )
     if not merge_result.success or merge_result.merged_frame is None:
         return
 
     row_metrics = st.columns(2)
-    row_metrics[0].metric("Original fact rows", f"{merge_result.fact_row_count:,}")
-    row_metrics[1].metric("Final merged rows", f"{merge_result.final_row_count:,}")
-    st.markdown("#### Merged dataset preview")
+    row_metrics[0].metric(t("merge.original_rows"), f"{merge_result.fact_row_count:,}")
+    row_metrics[1].metric(t("merge.final_rows"), f"{merge_result.final_row_count:,}")
+    st.markdown(f"#### {t('merge.preview')}")
     st.dataframe(
         merge_result.merged_frame.head(20),
         hide_index=True,
@@ -587,9 +655,12 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
 
 def render_generic_relationship_mode():
     """Render the unified one-or-more-table data preparation flow."""
-    st.subheader("Upload")
+    render_step_guide(1)
+    st.subheader(t("upload.title"))
+    with st.expander(t("upload.help.title"), expanded=False):
+        st.markdown(t("upload.help.body"))
     uploaded_files = st.file_uploader(
-        "Sales data files",
+        t("upload.label"),
         type=["csv", "xlsx"],
         accept_multiple_files=True,
         key="generic_uploaded_files",
@@ -599,42 +670,82 @@ def render_generic_relationship_mode():
         st.session_state, signature
     )
     if files_changed and uploaded_files:
-        st.info("Files changed. Previous discovery, decisions, plan, and merge output were cleared.")
+        st.info(t("upload.changed"))
 
     discovery_result = st.session_state.get("generic_discovery_result")
     if uploaded_files and discovery_result is None:
         try:
-            with st.spinner("Reading and profiling uploaded tables..."):
+            with st.spinner(t("upload.spinner")):
                 discovery_result = discover_relationships_from_sources(uploaded_files)
             _initialize_discovery_state(discovery_result)
         except Exception as error:
-            st.error(f"Relationship discovery failed: {error}")
+            error_key = getattr(error, "ui_message_key", None)
+            user_message = t(error_key) if error_key else str(error)
+            st.error(t("upload.failed", error=user_message))
             return None
 
     if discovery_result is None:
         return
 
-    with st.expander("Detected table profiles", expanded=True):
+    st.success(
+        t(
+            "upload.summary",
+            file_count=len(uploaded_files or ()),
+            table_count=len(discovery_result.tables),
+        )
+    )
+    render_step_guide(2)
+    st.subheader(t("tables.title"))
+    st.write(t("tables.explanation"))
+    with st.expander(t("tables.expander"), expanded=True):
+        st.caption(t("tables.terms"))
         st.dataframe(
             pd.DataFrame(_table_profile_records(discovery_result)),
             hide_index=True,
             use_container_width=True,
             column_config={
-                "role_confidence": st.column_config.NumberColumn(format="percent")
+                "table": t("table.column.table"),
+                "source": t("table.column.source"),
+                "sheet": t("table.column.sheet"),
+                "encoding": t("table.column.encoding"),
+                "rows": t("table.column.rows"),
+                "columns": t("table.column.columns"),
+                "role": t("table.column.role"),
+                "role_score_breakdown": t("table.column.role_breakdown"),
+                "role_confidence": st.column_config.NumberColumn(
+                    t("table.column.role_confidence"), format="percent"
+                ),
+                "entity_role": t("table.column.entity_role"),
+                "entity_confidence": st.column_config.NumberColumn(
+                    t("table.column.entity_confidence"), format="percent"
+                ),
             },
         )
+    st.warning(t("tables.warning"))
 
     if len(discovery_result.tables) == 1:
         return _render_single_table_route(discovery_result)
 
-    st.subheader("Select Main Transaction Table")
+    render_step_guide(3)
+    st.subheader(t("fact.title"))
+    st.write(t("fact.guidance"))
     table_ids = [profile.table_id for profile in discovery_result.table_profiles]
+    recommended_profile = max(
+        discovery_result.table_profiles,
+        key=lambda profile: (
+            profile.role_guess == "fact",
+            profile.role_confidence,
+            profile.row_count,
+        ),
+    )
+    st.info(t("fact.recommendation", table=recommended_profile.table_name))
+    st.caption(t("fact.recommendation_reason"))
     fact_table_id = st.selectbox(
-        "Main transaction table",
+        t("fact.label"),
         [None] + table_ids,
         index=0,
         format_func=lambda value: (
-            "Select a fact table"
+            t("fact.placeholder")
             if value is None
             else _format_table(discovery_result, value)
         ),
@@ -644,10 +755,20 @@ def render_generic_relationship_mode():
         st.session_state["generic_fact_table_snapshot"] = fact_table_id
         invalidate_generic_plan_state(st.session_state)
 
-    st.subheader("Review Relationship Candidates")
+    if not fact_table_id:
+        st.warning(t("fact.blocked"))
+
+    render_step_guide(4)
+    st.subheader(t("relationships.title"))
+    with st.expander(t("relationships.help.title"), expanded=False):
+        st.markdown(t("relationships.help.body"))
+        st.markdown(t("relationships.metrics_help"))
     if discovery_result.relationships:
         _render_candidate_groups(discovery_result)
     else:
-        st.info("No reasonable relationship candidates were detected.")
+        st.info(t("relationships.no_candidates"))
+        st.caption(t("relationships.no_candidates_guidance"))
+        if discovery_result.diagnostics.get("format_warnings"):
+            st.warning(t("relationship.format_warning"))
 
     return _render_plan_and_merge(discovery_result, fact_table_id)
