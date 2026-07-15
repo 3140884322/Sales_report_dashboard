@@ -22,7 +22,7 @@ from generic_report_generation import (
 )
 from standard_field_mapping import StandardFieldMappingError
 from ui_guidance import blocked_reason_key, render_blocked_reason, render_step_guide
-from ui_i18n import t
+from ui_i18n import get_language, t
 
 
 BUTTON_SUPPORTS_ICON = "icon" in inspect.signature(st.button).parameters
@@ -88,6 +88,7 @@ def _conversion_records(mapping_result):
 
 
 def _preflight_options(mapping_result):
+    language = get_language()
     orders = mapping_result.unified_orders
     prices = pd.to_numeric(orders["unit_price"], errors="coerce")
     quantities = pd.to_numeric(orders["quantity"], errors="coerce")
@@ -103,10 +104,10 @@ def _preflight_options(mapping_result):
         date_action = st.radio(
             t("preflight.invalid_date_question"),
             [INVALID_DATE_ACTION_BLOCK, INVALID_DATE_ACTION_EXCLUDE_MONTHLY],
-            format_func=lambda value: (
-                t("preflight.invalid_date_block")
+            format_func=lambda value, language=language: (
+                t("preflight.invalid_date_block", language)
                 if value == INVALID_DATE_ACTION_BLOCK
-                else t("preflight.invalid_date_continue")
+                else t("preflight.invalid_date_continue", language)
             ),
             key="generic_report_date_action",
             on_change=_clear_report_output,

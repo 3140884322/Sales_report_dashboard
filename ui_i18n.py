@@ -210,6 +210,10 @@ EN = {
         "{count} mapping item(s) still require attention. Complete the highlighted "
         "items before generating the standardized preview."
     ),
+    "mapping.invalid_saved_choice": (
+        "A saved mapping selection for {field} was invalid ({choice}). Review and "
+        "select that field again before continuing."
+    ),
     "mapping.required_progress": "Required fields confirmed: {confirmed}/{total}",
     "mapping.generate": "Validate and Generate Unified Orders Preview",
     "mapping.generate_blocked": (
@@ -242,6 +246,7 @@ EN = {
     "strategy.not_applicable": "Not applicable to this business",
     "strategy.omit": "Omit optional field",
     "strategy.source": "Map from source: {source}",
+    "strategy.invalid_saved": "Invalid saved selection",
     "preflight.title": "Report Preflight Review",
     "preflight.intro": (
         "Review calculation coverage and data-quality issues before generating the "
@@ -512,6 +517,10 @@ ZH = {
     "mapping.additional_help": "标准化数据只保留必需字段、已确认的可选字段，以及这里明确选择的扩展列。",
     "mapping.checks": "映射检查（{count} 项未完成）",
     "mapping.incomplete": "还有 {count} 个映射项目需要处理。请完成标记项目后再生成标准化预览。",
+    "mapping.invalid_saved_choice": (
+        "{field} 的已保存映射选项无效（{choice}）。"
+        "请重新检查并选择该字段后再继续。"
+    ),
     "mapping.required_progress": "必需字段已确认：{confirmed}/{total}",
     "mapping.generate": "校验并生成标准订单明细预览",
     "mapping.generate_blocked": "请完成全部必需映射、解决来源列重复使用，并确认所有启用的选择后再继续。",
@@ -534,6 +543,7 @@ ZH = {
     "strategy.not_applicable": "不适用于此业务",
     "strategy.omit": "不使用此可选字段",
     "strategy.source": "映射来源列：{source}",
+    "strategy.invalid_saved": "无效的已保存选项",
     "preflight.title": "报告生成前检查",
     "preflight.intro": "生成报告前，请检查计算覆盖范围和数据质量问题。严重问题会阻止生成；警告可在知情后继续；信息用于说明分析覆盖范围。原始上传文件不会被修改。",
     "preflight.expenses": "可选费用 CSV",

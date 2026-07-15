@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass
 
 import pandas as pd
 import streamlit as st
@@ -21,13 +22,44 @@ from standard_field_mapping import (
 )
 from standard_field_models import StandardFieldSelection
 from ui_guidance import blocked_reason_key, render_blocked_reason, render_step_guide
-from ui_i18n import field_help, field_label, t
+from ui_i18n import field_help, field_label, get_language, t
 
 
 BUTTON_SUPPORTS_ICON = "icon" in inspect.signature(st.button).parameters
 LARGE_ROW_WARNING = 500_000
 LARGE_COLUMN_WARNING = 200
 LARGE_MEMORY_WARNING_BYTES = 250 * 1024 * 1024
+
+DIRECT_CHOICE_STRATEGIES = frozenset(
+    {"unmapped", "not_provided", "not_applicable", "omit"}
+)
+ASSUMPTION_CHOICE_STRATEGIES = frozenset({"default_zero"})
+LEGACY_DISPLAY_STRATEGIES = {
+    "Not mapped": "unmapped",
+    "Default 0 (explicit business assumption)": "default_zero",
+    "Data not provided (keep as unknown)": "not_provided",
+    "Not applicable to this business": "not_applicable",
+    "Omit optional field": "omit",
+    "未映射": "unmapped",
+    "默认 0（明确业务假设）": "default_zero",
+    "数据未提供（保持未知）": "not_provided",
+    "不适用于此业务": "not_applicable",
+    "不使用此可选字段": "omit",
+}
+LEGACY_SOURCE_PREFIXES = ("Map from source: ", "映射来源列：")
+
+
+@dataclass(frozen=True)
+class DecodedMappingChoice:
+    strategy: str
+    source_column: str | None
+    normalized_choice: str
+    error: str | None = None
+
+    @property
+    def valid(self):
+        return self.error is None
+
 
 def _button(label, icon=None, **kwargs):
     if icon and BUTTON_SUPPORTS_ICON:
@@ -57,22 +89,69 @@ def _mapping_signature(frame, source_entity_roles):
 
 def _encode_choice(strategy, source_column=None):
     if strategy == "source" and source_column is not None:
-        return f"source::{source_column}"
-    return f"strategy::{strategy}"
+        return f"column::{source_column}"
+    if strategy in ASSUMPTION_CHOICE_STRATEGIES:
+        return f"assumption::{strategy}"
+    if strategy in DIRECT_CHOICE_STRATEGIES:
+        return strategy
+    raise ValueError(f"Unsupported mapping strategy: {strategy!r}")
 
 
 def _decode_choice(choice):
-    kind, value = choice.split("::", 1)
+    if not isinstance(choice, str) or not choice:
+        return DecodedMappingChoice(
+            "unmapped",
+            None,
+            "unmapped",
+            f"Invalid empty mapping choice: {choice!r}",
+        )
+    if choice in DIRECT_CHOICE_STRATEGIES:
+        return DecodedMappingChoice(choice, None, choice)
+
+    legacy_strategy = LEGACY_DISPLAY_STRATEGIES.get(choice)
+    if legacy_strategy is not None:
+        return _decode_choice(_encode_choice(legacy_strategy))
+    for prefix in LEGACY_SOURCE_PREFIXES:
+        if choice.startswith(prefix) and choice[len(prefix) :]:
+            return _decode_choice(f"column::{choice[len(prefix):]}")
+
+    kind, separator, value = choice.partition("::")
+    if not separator or not value:
+        return DecodedMappingChoice(
+            "unmapped",
+            None,
+            "unmapped",
+            f"Unknown mapping choice: {choice!r}",
+        )
+    if kind == "column":
+        return DecodedMappingChoice("source", value, f"column::{value}")
+    if kind == "assumption" and value in ASSUMPTION_CHOICE_STRATEGIES:
+        return DecodedMappingChoice(value, None, f"assumption::{value}")
+
+    # Migrate stable values stored by versions released before this option schema.
     if kind == "source":
-        return "source", value
-    return value, None
+        return DecodedMappingChoice("source", value, f"column::{value}")
+    if kind == "strategy":
+        if value in DIRECT_CHOICE_STRATEGIES:
+            return DecodedMappingChoice(value, None, value)
+        if value in ASSUMPTION_CHOICE_STRATEGIES:
+            return DecodedMappingChoice(value, None, f"assumption::{value}")
+
+    return DecodedMappingChoice(
+        "unmapped",
+        None,
+        "unmapped",
+        f"Unknown mapping choice: {choice!r}",
+    )
 
 
-def _format_choice(choice):
-    strategy, source = _decode_choice(choice)
-    if strategy == "source":
-        return t("strategy.source", source=source)
-    return t(f"strategy.{strategy}")
+def _format_choice(choice, language=None):
+    decoded = _decode_choice(choice)
+    if not decoded.valid:
+        return t("strategy.invalid_saved", language)
+    if decoded.strategy == "source":
+        return t("strategy.source", language, source=decoded.source_column)
+    return t(f"strategy.{decoded.strategy}", language)
 
 
 def _choice_options(field, source_columns):
@@ -87,8 +166,8 @@ def _choice_options(field, source_columns):
         strategies = ("omit",)
     else:
         strategies = ("unmapped",)
-    return [f"strategy::{strategy}" for strategy in strategies] + [
-        f"source::{column}" for column in source_columns
+    return [_encode_choice(strategy) for strategy in strategies] + [
+        _encode_choice("source", column) for column in source_columns
     ]
 
 
@@ -99,10 +178,19 @@ def _clear_mapping_output():
 
 
 def _choice_changed(field):
-    choice = st.session_state.get(f"generic_mapping_choice_{field}")
-    strategy = _decode_choice(choice)[0] if choice else "unmapped"
+    choice_key = f"generic_mapping_choice_{field}"
+    error_key = f"generic_mapping_choice_error_{field}"
+    choice = st.session_state.get(choice_key)
+    decoded = _decode_choice(choice)
+    if decoded.valid:
+        st.session_state[choice_key] = decoded.normalized_choice
+        st.session_state.pop(error_key, None)
+    else:
+        st.session_state[error_key] = choice
+    strategy = decoded.strategy
     st.session_state[f"generic_mapping_confirm_{field}"] = (
-        field in OPTIONAL_ANALYSIS_FIELDS
+        decoded.valid
+        and field in OPTIONAL_ANALYSIS_FIELDS
         and strategy in {"not_provided", "not_applicable", "omit"}
     )
     _clear_mapping_output()
@@ -188,8 +276,10 @@ def _initialize_mapping_state(frame, source_entity_roles):
 
 def _render_field_choices(frame, recommendations, source_entity_roles):
     source_columns = list(map(str, frame.columns))
+    language = get_language()
     selections = []
     inference_records = []
+    choice_errors = []
 
     for section_key, field_type_key, fields in (
         ("mapping.required_section", "common.required", REQUIRED_TRANSACTION_FIELDS),
@@ -203,14 +293,33 @@ def _render_field_choices(frame, recommendations, source_entity_roles):
             )
             choice_key = f"generic_mapping_choice_{field}"
             confirm_key = f"generic_mapping_confirm_{field}"
+            error_key = f"generic_mapping_choice_error_{field}"
             options = _choice_options(field, source_columns)
             current_choice = st.session_state.get(choice_key)
-            if current_choice not in options:
+            decoded_current = _decode_choice(current_choice)
+            if decoded_current.valid:
+                current_choice = decoded_current.normalized_choice
+                st.session_state[choice_key] = current_choice
+            if not decoded_current.valid or current_choice not in options:
+                st.session_state[error_key] = current_choice
                 current_choice = _encode_choice(
                     recommendation.recommended_strategy,
                     recommendation.recommended_source,
                 )
+                if current_choice not in options:
+                    current_choice = options[0]
                 st.session_state[choice_key] = current_choice
+                st.session_state[confirm_key] = False
+
+            invalid_saved_choice = st.session_state.get(error_key)
+            if invalid_saved_choice is not None:
+                choice_errors.append(
+                    t(
+                        "mapping.invalid_saved_choice",
+                        field=field_label(field),
+                        choice=repr(invalid_saved_choice),
+                    )
+                )
 
             columns = st.columns([1.2, 3.8, 1.2])
             columns[0].markdown(
@@ -220,12 +329,16 @@ def _render_field_choices(frame, recommendations, source_entity_roles):
             columns[1].selectbox(
                 t("mapping.for_field", field=field_label(field)),
                 options,
-                format_func=_format_choice,
+                format_func=lambda choice, language=language: _format_choice(
+                    choice, language
+                ),
                 key=choice_key,
                 on_change=_choice_changed,
                 args=(field,),
             )
-            strategy, source_column = _decode_choice(st.session_state[choice_key])
+            decoded = _decode_choice(st.session_state[choice_key])
+            strategy = decoded.strategy
+            source_column = decoded.source_column
             active = strategy != "omit"
             confirmation_not_required = (
                 field in OPTIONAL_ANALYSIS_FIELDS
@@ -271,14 +384,16 @@ def _render_field_choices(frame, recommendations, source_entity_roles):
             inference_records.append(
                 {
                     "standard_field": field,
-                    "source_or_strategy": _format_choice(st.session_state[choice_key]),
+                    "source_or_strategy": _format_choice(
+                        st.session_state[choice_key], language
+                    ),
                     "inferred_confidence": confidence,
                     "confirmed": confirmed,
                     "explanation": explanation,
                 }
             )
 
-    return tuple(selections), inference_records
+    return tuple(selections), inference_records, tuple(choice_errors)
 
 
 def _live_mapping_errors(selections):
@@ -343,7 +458,7 @@ def render_generic_standard_mapping(
         )
         st.caption(t("mapping.recommendation_notice"))
 
-    selections, inference_records = _render_field_choices(
+    selections, inference_records, choice_errors = _render_field_choices(
         frame,
         recommendations,
         source_entity_roles,
@@ -363,6 +478,7 @@ def render_generic_standard_mapping(
     )
 
     live_errors, source_usage = _live_mapping_errors(selections)
+    live_errors = choice_errors + live_errors
     required_confirmed = sum(
         selection.strategy != "unmapped" and selection.confirmed
         for selection in selections

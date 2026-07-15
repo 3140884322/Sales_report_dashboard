@@ -32,7 +32,7 @@ from ui_guidance import (
     render_blocked_reason,
     render_step_guide,
 )
-from ui_i18n import t
+from ui_i18n import get_language, t
 
 
 BUTTON_SUPPORTS_ICON = "icon" in inspect.signature(st.button).parameters
@@ -55,11 +55,11 @@ def _table_profile_by_id(discovery_result):
     }
 
 
-def _format_table(discovery_result, table_id):
+def _format_table(discovery_result, table_id, language=None):
     profile = _table_profile_by_id(discovery_result)[table_id]
     return (
         f"{profile.table_name} | {profile.role_guess} | "
-        f"{profile.row_count:,} {t('common.rows')}"
+        f"{profile.row_count:,} {t('common.rows', language)}"
     )
 
 
@@ -153,13 +153,16 @@ def _select_index(options, value):
 
 def _render_relationship_editor(discovery_result, original_candidate):
     token = _widget_token(original_candidate.candidate_id)
+    language = get_language()
     st.markdown(f"##### {t('relationship.editor.title')}")
     table_ids = [profile.table_id for profile in discovery_result.table_profiles]
     left_table_id = st.selectbox(
         t("relationship.editor.left_table"),
         table_ids,
         index=_select_index(table_ids, original_candidate.left_table_id),
-        format_func=lambda value: _format_table(discovery_result, value),
+        format_func=lambda value, language=language: _format_table(
+            discovery_result, value, language
+        ),
         key=f"generic_edit_{token}_left_table",
     )
     right_options = [table_id for table_id in table_ids if table_id != left_table_id]
@@ -167,14 +170,20 @@ def _render_relationship_editor(discovery_result, original_candidate):
         t("relationship.editor.right_table"),
         right_options,
         index=_select_index(right_options, original_candidate.right_table_id),
-        format_func=lambda value: _format_table(discovery_result, value),
+        format_func=lambda value, language=language: _format_table(
+            discovery_result, value, language
+        ),
         key=f"generic_edit_{token}_{left_table_id}_right_table",
     )
     key_size = st.radio(
         t("relationship.editor.key_size"),
         [1, 2],
         index=0 if len(original_candidate.left_columns) == 1 else 1,
-        format_func=lambda value: t("relationship.editor.single") if value == 1 else t("relationship.editor.composite"),
+        format_func=lambda value, language=language: (
+            t("relationship.editor.single", language)
+            if value == 1
+            else t("relationship.editor.composite", language)
+        ),
         horizontal=True,
         key=f"generic_edit_{token}_key_size",
     )
@@ -654,6 +663,7 @@ def _render_plan_and_merge(discovery_result, fact_table_id):
 
 
 def render_generic_relationship_mode():
+    language = get_language()
     """Render the unified one-or-more-table data preparation flow."""
     render_step_guide(1)
     st.subheader(t("upload.title"))
@@ -744,10 +754,10 @@ def render_generic_relationship_mode():
         t("fact.label"),
         [None] + table_ids,
         index=0,
-        format_func=lambda value: (
-            t("fact.placeholder")
+        format_func=lambda value, language=language: (
+            t("fact.placeholder", language)
             if value is None
-            else _format_table(discovery_result, value)
+            else _format_table(discovery_result, value, language)
         ),
         key="generic_fact_table_id",
     )
