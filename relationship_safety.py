@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+import unicodedata
 
 import pandas as pd
 
 
 MINIMUM_ORDER_GRAIN_MATCH_RATE = 0.20
 NULL_KEY_TOKENS = frozenset({"", "nan", "none", "null", "<na>", "nat"})
-ZERO_WIDTH_PATTERN = r"[\u200b\u200c\u200d\ufeff]"
+ZERO_WIDTH_TRANSLATION = {
+    ord("\u200b"): None,
+    ord("\u200c"): None,
+    ord("\u200d"): None,
+    ord("\ufeff"): None,
+}
 FORMAT_DIAGNOSTIC_SAMPLE_SIZE = 5_000
 
 
@@ -34,12 +41,20 @@ class JoinSafetyAssessment:
     format_warnings: tuple[str, ...]
 
 
+def normalize_relationship_key(value: object) -> object:
+    """Normalize one comparison key without relying on a pandas regex backend."""
+    if pd.isna(value):
+        return pd.NA
+    text = unicodedata.normalize("NFKC", str(value))
+    text = text.translate(ZERO_WIDTH_TRANSLATION)
+    text = text.replace("\u00a0", " ")
+    text = re.sub(r"\s+", " ", text).strip().casefold()
+    return pd.NA if text in NULL_KEY_TOKENS else text
+
+
 def _normalize_text_key_series(series: pd.Series) -> pd.Series:
-    values = series.astype("string").str.normalize("NFKC")
-    values = values.str.replace(ZERO_WIDTH_PATTERN, "", regex=True)
-    values = values.str.replace("\u00a0", " ", regex=False)
-    values = values.str.replace(r"\s+", " ", regex=True).str.strip().str.casefold()
-    return values.mask(values.isin(NULL_KEY_TOKENS))
+    values = series.map(normalize_relationship_key)
+    return values.astype("string")
 
 
 def canonicalize_key_series(series: pd.Series, comparison_kind: str) -> pd.Series:

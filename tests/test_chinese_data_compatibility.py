@@ -1,4 +1,6 @@
 from io import BytesIO
+import importlib.util
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -299,6 +301,32 @@ class ChineseAliasAndFallbackTests(unittest.TestCase):
 
 
 class RelationshipKeyNormalizationTests(unittest.TestCase):
+    NORMALIZATION_VALUES = ["Ａ００１", "A002\u200b", "A003\u00a0", "\ufeffA004"]
+    NORMALIZED_VALUES = ["a001", "a002", "a003", "a004"]
+
+    def _assert_normalization_backend(self, dtype):
+        source = pd.Series(self.NORMALIZATION_VALUES, dtype=dtype)
+        original = source.copy(deep=True)
+
+        normalized = canonicalize_key_series(source, "text")
+
+        self.assertEqual(normalized.tolist(), self.NORMALIZED_VALUES)
+        pd.testing.assert_series_equal(source, original)
+
+    def test_relationship_key_normalization_with_object_dtype(self):
+        self._assert_normalization_backend("object")
+
+    def test_relationship_key_normalization_with_pandas_string_dtype(self):
+        self._assert_normalization_backend("string[python]")
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("pyarrow") is not None,
+        "pyarrow is not installed",
+    )
+    def test_relationship_key_normalization_with_pyarrow_string_dtype(self):
+        with pd.option_context("mode.string_storage", "pyarrow"):
+            self._assert_normalization_backend("string[pyarrow]")
+
     def test_nfkc_spaces_and_hidden_characters_match_without_mutating_sources(self):
         original_keys = ["Ａ００１", "A002\u200b", "A\u00a0003", " a004 ", "A005"]
         sales = pd.DataFrame(
@@ -405,6 +433,44 @@ class RelationshipKeyNormalizationTests(unittest.TestCase):
         self.assertLessEqual(discovery.diagnostics["fallback_sample_comparisons"], 64)
         self.assertLessEqual(discovery.diagnostics["fallback_full_comparisons"], 4)
         self.assertEqual(discovery.diagnostics["fallback_candidate_count"], 0)
+
+
+class ArrowBackedAcceptanceWorkbookTests(unittest.TestCase):
+    workbook_path = Path(
+        os.environ.get(
+            "SALES_DASHBOARD_ACCEPTANCE_XLSX",
+            "/Users/xiaoma/Desktop/test data/"
+            "Sales_Report_Dashboard_功能验收数据包_兼容版/"
+            "02_中文多表_标准关系.xlsx",
+        )
+    )
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("pyarrow") is not None,
+        "pyarrow is not installed",
+    )
+    def test_actual_chinese_multitable_workbook_with_arrow_string_storage(self):
+        if not self.workbook_path.is_file():
+            self.skipTest(f"Acceptance workbook not found: {self.workbook_path}")
+
+        with pd.option_context("mode.string_storage", "pyarrow"):
+            discovery = discover_relationships_from_sources(self.workbook_path)
+
+        self.assertEqual(
+            [table.table_name for table in discovery.tables],
+            ["销售明细", "商品档案", "客户档案", "门店档案"],
+        )
+        expected = {
+            ("商品编号", "商品档案", "商品编号"),
+            ("客户编号", "客户档案", "客户编号"),
+            ("门店编号", "门店档案", "门店编号"),
+        }
+        observed = {
+            (candidate.left_columns[0], candidate.right_table, candidate.right_columns[0])
+            for candidate in discovery.relationships
+            if len(candidate.left_columns) == 1 and not candidate.blocked
+        }
+        self.assertTrue(expected.issubset(observed))
 
 
 if __name__ == "__main__":
