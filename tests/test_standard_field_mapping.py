@@ -19,7 +19,10 @@ from confirmed_relationship_plan import (
 from generic_table_reader import read_tabular_sources
 from relationship_discovery import discover_relationships
 from standard_field_mapping import (
+    BUSINESS_ASSUMPTION_FIELDS,
+    OPTIONAL_ANALYSIS_FIELDS,
     REQUIRED_STANDARD_FIELDS,
+    RETURN_NOT_APPLICABLE_MESSAGE,
     generate_unified_orders,
     recommend_standard_field_mappings,
     selections_from_recommendations,
@@ -159,6 +162,12 @@ class StandardFieldConversionTests(unittest.TestCase):
         returned = self.result.unified_orders["returned"]
         self.assertEqual(str(returned.dtype), "boolean")
         self.assertEqual(returned.tolist(), [True, False, True, False])
+        availability = next(
+            item
+            for item in self.result.field_availability
+            if item.field_name == "returned"
+        )
+        self.assertEqual(availability.availability_status, "provided")
 
     def test_severe_conversion_failure_blocks_output(self):
         frame = standard_source_frame()
@@ -198,11 +207,38 @@ class MissingFieldStrategyTests(unittest.TestCase):
         )
         self.assertEqual(diagnostic.status, "not_provided")
 
+    def test_returned_not_applicable_remains_missing_without_warning(self):
+        selections = replace_selection(
+            confirmed_recommendations(self.frame),
+            "returned",
+            strategy="not_applicable",
+            source_column=None,
+            confirmed=True,
+        )
+
+        result = generate_unified_orders(self.frame, selections)
+        returned = result.unified_orders["returned"]
+        availability = next(
+            item
+            for item in result.field_availability
+            if item.field_name == "returned"
+        )
+
+        self.assertTrue(result.success, result.errors)
+        self.assertTrue(returned.isna().all())
+        self.assertEqual(availability.availability_status, "not_applicable")
+        self.assertEqual(availability.notes, RETURN_NOT_APPLICABLE_MESSAGE)
+        self.assertFalse(
+            any("Return data was not provided" in warning for warning in result.warnings)
+        )
+
     def test_unified_orders_contains_all_analysis_required_columns(self):
         self.assertEqual(
-            tuple(field for field in REQUIRED_COLUMNS if field != "customer_id"),
+            ("order_id", "date", "product_id", "unit_price", "quantity"),
             REQUIRED_STANDARD_FIELDS,
         )
+        self.assertIn("returned", OPTIONAL_ANALYSIS_FIELDS)
+        self.assertIn("discount_rate", BUSINESS_ASSUMPTION_FIELDS)
         self.assertTrue(set(REQUIRED_COLUMNS).issubset(self.result.unified_orders.columns))
 
     def test_missing_customer_id_remains_unknown_without_temporary_values(self):

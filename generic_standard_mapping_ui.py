@@ -11,8 +11,9 @@ from generic_relationship_state import (
 )
 from generic_report_ui import render_generic_report_generation
 from standard_field_mapping import (
-    OPTIONAL_STANDARD_FIELDS,
-    REQUIRED_STANDARD_FIELDS,
+    BUSINESS_ASSUMPTION_FIELDS,
+    OPTIONAL_ANALYSIS_FIELDS,
+    REQUIRED_TRANSACTION_FIELDS,
     build_source_entity_role_map,
     evaluate_field_mapping_recommendation,
     generate_unified_orders,
@@ -30,6 +31,7 @@ STRATEGY_LABELS = {
     "unmapped": "Not mapped",
     "default_zero": "Default 0 (explicit business assumption)",
     "not_provided": "Data not provided (keep as unknown)",
+    "not_applicable": "Not applicable to this business",
     "omit": "Omit optional field",
 }
 
@@ -76,19 +78,19 @@ def _decode_choice(choice):
 def _format_choice(choice):
     strategy, source = _decode_choice(choice)
     if strategy == "source":
-        return f"Source: {source}"
+        return f"Map from source: {source}"
     return STRATEGY_LABELS[strategy]
 
 
 def _choice_options(field, source_columns):
     special = {
-        "discount_rate": ("unmapped", "default_zero"),
-        "returned": ("unmapped", "not_provided"),
+        "discount_rate": ("default_zero",),
+        "returned": ("not_provided", "not_applicable"),
         "customer_id": ("not_provided", "omit"),
     }
     if field in special:
         strategies = special[field]
-    elif field in OPTIONAL_STANDARD_FIELDS:
+    elif field in OPTIONAL_ANALYSIS_FIELDS:
         strategies = ("omit",)
     else:
         strategies = ("unmapped",)
@@ -193,9 +195,10 @@ def _render_field_choices(frame, recommendations, source_entity_roles):
     selections = []
     inference_records = []
 
-    for section_label, fields in (
-        ("Required fields", REQUIRED_STANDARD_FIELDS),
-        ("Optional fields", OPTIONAL_STANDARD_FIELDS),
+    for section_label, field_label, fields in (
+        ("Required transaction fields", "Required", REQUIRED_TRANSACTION_FIELDS),
+        ("Optional analysis fields", "Optional", OPTIONAL_ANALYSIS_FIELDS),
+        ("Business assumptions", "Assumption", BUSINESS_ASSUMPTION_FIELDS),
     ):
         st.markdown(f"#### {section_label}")
         for field in fields:
@@ -207,12 +210,15 @@ def _render_field_choices(frame, recommendations, source_entity_roles):
             options = _choice_options(field, source_columns)
             current_choice = st.session_state.get(choice_key)
             if current_choice not in options:
-                current_choice = "strategy::omit" if field in OPTIONAL_STANDARD_FIELDS else "strategy::unmapped"
+                current_choice = _encode_choice(
+                    recommendation.recommended_strategy,
+                    recommendation.recommended_source,
+                )
                 st.session_state[choice_key] = current_choice
 
             columns = st.columns([1.2, 3.8, 1.2])
             columns[0].markdown(
-                f"**{field}**  \n{'Required' if field in REQUIRED_STANDARD_FIELDS else 'Optional'}"
+                f"**{field}**  \n{field_label}"
             )
             columns[1].selectbox(
                 f"Mapping for {field}",
@@ -273,7 +279,7 @@ def _live_mapping_errors(selections):
     errors = []
     source_usage = {}
     for selection in selections:
-        if selection.standard_field in REQUIRED_STANDARD_FIELDS:
+        if selection.standard_field in REQUIRED_TRANSACTION_FIELDS:
             if selection.strategy == "unmapped":
                 errors.append(f"{selection.standard_field} is not mapped.")
             elif not selection.confirmed:

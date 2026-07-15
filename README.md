@@ -52,30 +52,45 @@ sample_data/mapped_columns_case/config.json
 The `_zh` files use Chinese column names and are intended to demonstrate the
 optional column mapping config.
 
-## Required Columns
+## Standard Fields
 
 These are the system standard column names after optional config mapping.
 
-Orders file:
+Required transaction fields:
 
 - `order_id`
 - `date`
-- `customer_id`
 - `product_id`
 - `unit_price`
 - `quantity`
-- `discount_rate`
+
+Optional analysis fields:
+
+- `customer_id`
 - `returned`
-
-In the Streamlit upload flow, `customer_id` is optional. When it is unavailable
-or only partially provided, customer analysis is skipped without generating a
-temporary customer identifier.
-
-Optional order columns:
-
 - `customer_name`
 - `product_name`
 - `category`
+- `store_id`
+- `store_name`
+
+Business assumptions:
+
+- `discount_rate`
+
+In the Streamlit upload flow, `customer_id` is optional. When it is unavailable
+or only partially provided, customer analysis is skipped without generating a
+temporary customer identifier. Return data can be mapped from a source column,
+marked as not provided, or marked as not applicable to the business. Missing or
+not-applicable return data remains nullable and never becomes a false value or
+0% return claim. `discount_rate` must be mapped or explicitly confirmed as a
+Default 0 business assumption.
+
+When `store_id` or `store_name` is available, the Generic report adds a
+conditional Store Analysis module with revenue, orders, units, AOV, and revenue
+share by store. Partial coverage is retained under `Unassigned Store` so store
+totals still reconcile to overall revenue. When neither field is available, the
+module is skipped and the limitation is recorded in Report Coverage.
 
 Expenses file:
 
@@ -198,6 +213,11 @@ The Excel report includes:
 - `largest_expenses`
 - `cash_flow_warnings`
 - `expenses_enriched`
+- `data_preparation_summary`
+- `field_availability`
+- `report_coverage`
+- `excluded_rows_detail`
+- `store_summary` (only when store data is available)
 
 ## Metric Definitions
 

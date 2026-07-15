@@ -80,6 +80,28 @@ class UnifiedUploadPageTests(unittest.TestCase):
         self.assertEqual(metrics["Main transaction table"], "coffee")
         self.assertEqual(metrics["Rows"], "2")
         self.assertEqual(metrics["Confirmed relationships"], "0")
+        mapping_sections = [item.value for item in app.markdown]
+        self.assertIn("#### Required transaction fields", mapping_sections)
+        self.assertIn("#### Optional analysis fields", mapping_sections)
+        self.assertIn("#### Business assumptions", mapping_sections)
+        returned_mapping = next(
+            item for item in app.selectbox if item.label == "Mapping for returned"
+        )
+        discount_mapping = next(
+            item
+            for item in app.selectbox
+            if item.label == "Mapping for discount_rate"
+        )
+        mapping_labels = {item.label for item in app.selectbox}
+        self.assertIn("Mapping for store_id", mapping_labels)
+        self.assertIn("Mapping for store_name", mapping_labels)
+        self.assertIn("Not applicable to this business", returned_mapping.options)
+        self.assertNotIn("Not mapped", returned_mapping.options)
+        self.assertIn(
+            "Default 0 (explicit business assumption)",
+            discount_mapping.options,
+        )
+        self.assertNotIn("Not mapped", discount_mapping.options)
 
     def test_multi_sheet_workbook_enters_relationship_flow(self):
         app = AppTest.from_file(str(PROJECT_DIR / "app.py")).run(timeout=10)

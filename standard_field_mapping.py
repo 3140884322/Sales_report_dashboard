@@ -19,22 +19,58 @@ from standard_field_models import (
 )
 
 
-REQUIRED_STANDARD_FIELDS = tuple(
-    field for field in REQUIRED_COLUMNS if field != "customer_id"
+REQUIRED_TRANSACTION_FIELDS = (
+    "order_id",
+    "date",
+    "product_id",
+    "unit_price",
+    "quantity",
 )
-OPTIONAL_STANDARD_FIELDS = (
+OPTIONAL_ANALYSIS_FIELDS = (
     "customer_id",
+    "returned",
     "customer_name",
     "product_name",
     "category",
+    "store_id",
+    "store_name",
 )
-STANDARD_FIELDS = REQUIRED_STANDARD_FIELDS + OPTIONAL_STANDARD_FIELDS
+BUSINESS_ASSUMPTION_FIELDS = ("discount_rate",)
+
+# Backward-compatible public aliases used by existing callers and tests.
+REQUIRED_STANDARD_FIELDS = REQUIRED_TRANSACTION_FIELDS
+OPTIONAL_STANDARD_FIELDS = OPTIONAL_ANALYSIS_FIELDS
+STANDARD_FIELDS = (
+    REQUIRED_TRANSACTION_FIELDS
+    + BUSINESS_ASSUMPTION_FIELDS
+    + OPTIONAL_ANALYSIS_FIELDS
+)
+PIPELINE_REQUIRED_OUTPUT_FIELDS = tuple(
+    field for field in REQUIRED_COLUMNS if field != "customer_id"
+)
+RETURN_NOT_PROVIDED_MESSAGE = (
+    "Return data was not provided. Return analysis was skipped."
+)
+RETURN_NOT_APPLICABLE_MESSAGE = "Return analysis: Not applicable."
+STORE_NOT_PROVIDED_MESSAGE = (
+    "Store data was not provided. Store analysis was skipped."
+)
+STORE_PARTIALLY_PROVIDED_MESSAGE = (
+    "Store data was partially provided. Some transactions could not be assigned "
+    "to a store."
+)
+STORE_NAME_GROUPING_NOTE = (
+    "Store analysis is grouped by store name because a stable store ID was not "
+    "provided."
+)
 ENTITY_STANDARD_FIELDS = {
     "customer_id": "customer",
     "customer_name": "customer",
     "product_id": "product",
     "product_name": "product",
     "category": "category",
+    "store_id": "store",
+    "store_name": "store",
 }
 KNOWN_ENTITY_ROLES = {
     "customer",
@@ -63,6 +99,8 @@ TARGET_TYPES = {
     "customer_name": "text",
     "product_name": "text",
     "category": "text",
+    "store_id": "identifier",
+    "store_name": "text",
 }
 
 # Aliases are deliberately field-specific. Generic words receive less weight than
@@ -155,6 +193,8 @@ FIELD_ALIASES = {
     },
     "product_name": {
         "product name": 60,
+        "product detail": 60,
+        "product type": 38,
         "item name": 56,
         "sku name": 56,
         "name": 34,
@@ -170,6 +210,34 @@ FIELD_ALIASES = {
         "分类": 60,
         "品类": 60,
     },
+    "store_id": {
+        "store id": 60,
+        "storeid": 60,
+        "store key": 60,
+        "shop id": 60,
+        "shopid": 60,
+        "branch id": 60,
+        "branchid": 60,
+        "location id": 58,
+        "outlet id": 60,
+        "门店编号": 60,
+        "门店id": 60,
+        "店铺编号": 60,
+        "分店编号": 60,
+    },
+    "store_name": {
+        "store name": 60,
+        "shop name": 60,
+        "branch name": 60,
+        "store location": 60,
+        "shop location": 60,
+        "outlet name": 60,
+        "location name": 58,
+        "门店名称": 60,
+        "店铺名称": 60,
+        "分店名称": 60,
+        "门店位置": 60,
+    },
 }
 
 FIELD_CONTEXTS = {
@@ -184,6 +252,8 @@ FIELD_CONTEXTS = {
     "customer_name": ("customer", "client", "buyer", "客户", "顾客"),
     "product_name": ("product", "sku", "item", "产品", "商品"),
     "category": ("product", "category", "类别", "分类", "品类"),
+    "store_id": ("store", "shop", "branch", "outlet", "门店", "店铺", "分店"),
+    "store_name": ("store", "shop", "branch", "outlet", "location", "门店", "店铺", "分店"),
 }
 
 TRUE_VALUES = {
@@ -216,10 +286,12 @@ ALLOWED_STRATEGIES = {
     "unit_price": {"source"},
     "quantity": {"source"},
     "discount_rate": {"source", "default_zero"},
-    "returned": {"source", "not_provided"},
+    "returned": {"source", "not_provided", "not_applicable"},
     "customer_name": {"source", "omit"},
     "product_name": {"source", "omit"},
     "category": {"source", "omit"},
+    "store_id": {"source", "omit"},
+    "store_name": {"source", "omit"},
 }
 
 
@@ -377,7 +449,7 @@ def _source_entity_role(
         ),
         ("category", ("category", "categories", "subcategory")),
         ("product", ("product", "products", "sku", "item", "items")),
-        ("store", ("store", "stores", "shop", "branch")),
+        ("store", ("store", "stores", "shop", "branch", "outlet")),
     )
     for role, aliases in role_aliases:
         if any(_contains_phrase(normalized, alias) for alias in aliases):
@@ -461,7 +533,12 @@ def _score_source_column(
         entity_role_score = -70.0
 
     display_identifier_penalty = 0.0
-    if standard_field in {"customer_name", "product_name", "category"} and (
+    if standard_field in {
+        "customer_name",
+        "product_name",
+        "category",
+        "store_name",
+    } and (
         _identifier_display_source(column)
     ):
         display_identifier_penalty = -45.0
@@ -474,6 +551,8 @@ def _score_source_column(
         + entity_role_score
         + display_identifier_penalty
     )
+    if standard_field in {"store_id", "store_name"} and name_score == 0:
+        score = min(score, RECOMMENDATION_THRESHOLD - 1)
     if target_type in {"money", "number", "rate", "date", "boolean"}:
         if evidence.sample_count and compatibility < 0.5:
             score = min(score, 45.0)
@@ -672,13 +751,21 @@ def build_standard_mapping_plan(
     by_field, errors = _selection_map(selections)
     source_usage: dict[str, str] = {}
 
-    for field in REQUIRED_STANDARD_FIELDS:
+    for field in REQUIRED_TRANSACTION_FIELDS:
         selection = by_field.get(field)
         if selection is None or selection.strategy == "unmapped":
             errors.append(f"Required standard field {field!r} is not mapped.")
             continue
         if not selection.confirmed:
             errors.append(f"Required standard field {field!r} is not confirmed.")
+
+    for field in BUSINESS_ASSUMPTION_FIELDS + ("returned",):
+        selection = by_field.get(field)
+        if selection is None or selection.strategy in {"unmapped", "omit"}:
+            errors.append(f"A strategy must be selected for {field!r}.")
+            continue
+        if not selection.confirmed:
+            errors.append(f"Standard field {field!r} is not confirmed.")
 
     for field, selection in by_field.items():
         allowed = ALLOWED_STRATEGIES[field]
@@ -704,12 +791,12 @@ def build_standard_mapping_plan(
                 )
             else:
                 source_usage[selection.source_column] = field
-            if not selection.confirmed and selection.strategy != "omit":
-                errors.append(f"Standard field {field!r} is not confirmed.")
         elif selection.source_column is not None:
             errors.append(
                 f"Strategy {selection.strategy!r} for {field!r} cannot also use a source column."
             )
+        if selection.strategy != "omit" and not selection.confirmed:
+            errors.append(f"Standard field {field!r} is not confirmed.")
 
     extension_columns = tuple(dict.fromkeys(selected_extension_columns))
     for column in extension_columns:
@@ -748,6 +835,7 @@ def _strategy_recommendation(
     explanations = {
         "default_zero": "User explicitly selected a constant discount rate of 0.",
         "not_provided": "User explicitly marked returned data as not provided.",
+        "not_applicable": "User explicitly marked return analysis as not applicable.",
         "temporary_row_id": "User selected a generated row-level customer identifier.",
         "temporary_order_id": "User selected a generated order-level customer identifier.",
         "omit": "Optional field was omitted.",
@@ -775,6 +863,7 @@ def _field_availability(
     plan: StandardFieldMappingPlan,
     output: pd.DataFrame | None = None,
     customer_mapping_issue: str | None = None,
+    store_mapping_issue: str | None = None,
 ) -> tuple[FieldAvailability, ...]:
     records = []
     for selection in plan.selections:
@@ -794,10 +883,17 @@ def _field_availability(
         elif selection.strategy == "not_provided":
             status = "not_provided"
             default_value = None
-            notes = (
-                "Source data was not provided. Values remain unknown and must "
-                "not be interpreted as false or zero."
-            )
+            if selection.standard_field == "returned":
+                notes = RETURN_NOT_PROVIDED_MESSAGE
+            else:
+                notes = (
+                    "Source data was not provided. Values remain unknown and must "
+                    "not be interpreted as false or zero."
+                )
+        elif selection.strategy == "not_applicable":
+            status = "not_applicable"
+            default_value = None
+            notes = RETURN_NOT_APPLICABLE_MESSAGE
         elif selection.strategy in {"temporary_row_id", "temporary_order_id"}:
             status = "generated_temporary"
             default_value = None
@@ -844,6 +940,25 @@ def _field_availability(
                 status = "mapping_conflict"
                 notes = f"{customer_mapping_issue} {count_note}"
 
+        if selection.standard_field in {"store_id", "store_name"} and output is not None:
+            total_row_count = len(output)
+            if selection.standard_field in output.columns:
+                present = _present_mask(output[selection.standard_field])
+                provided_row_count = int(present.sum())
+            else:
+                provided_row_count = 0
+            if selection.strategy == "source":
+                if provided_row_count == 0:
+                    status = "not_provided"
+                elif provided_row_count < total_row_count:
+                    status = "partially_provided"
+                else:
+                    status = "provided"
+                notes = (
+                    f"Non-empty {selection.standard_field} rows: "
+                    f"{provided_row_count:,} / {total_row_count:,} valid rows."
+                )
+
         records.append(
             FieldAvailability(
                 field_name=selection.standard_field,
@@ -851,6 +966,66 @@ def _field_availability(
                 source_column=selection.source_column,
                 default_value=default_value,
                 user_confirmed=selection.confirmed or selection.strategy == "omit",
+                notes=notes,
+                provided_row_count=provided_row_count,
+                total_row_count=total_row_count,
+            )
+        )
+    if output is not None:
+        total_row_count = len(output)
+        store_present = pd.Series(False, index=output.index)
+        source_columns = []
+        user_confirmed = True
+        for field in ("store_id", "store_name"):
+            selection = next(
+                item for item in plan.selections if item.standard_field == field
+            )
+            user_confirmed = user_confirmed and (
+                selection.confirmed or selection.strategy == "omit"
+            )
+            if selection.strategy == "source":
+                source_columns.append(str(selection.source_column))
+            if field in output.columns:
+                store_present = store_present | _present_mask(output[field])
+
+        provided_row_count = int(store_present.sum())
+        coverage_note = (
+            f"Store data was available for {provided_row_count:,} of "
+            f"{total_row_count:,} transaction rows."
+        )
+        if store_mapping_issue and provided_row_count:
+            status = "mapping_conflict"
+            notes = f"{store_mapping_issue} {coverage_note}"
+        elif provided_row_count == 0:
+            status = "not_provided"
+            notes = STORE_NOT_PROVIDED_MESSAGE
+        elif provided_row_count < total_row_count:
+            status = "partially_provided"
+            notes = f"{STORE_PARTIALLY_PROVIDED_MESSAGE} {coverage_note}"
+        else:
+            status = "provided"
+            notes = coverage_note
+
+        store_id_count = (
+            int(_present_mask(output["store_id"]).sum())
+            if "store_id" in output.columns
+            else 0
+        )
+        store_name_count = (
+            int(_present_mask(output["store_name"]).sum())
+            if "store_name" in output.columns
+            else 0
+        )
+        if store_id_count == 0 and store_name_count:
+            notes = f"{notes} {STORE_NAME_GROUPING_NOTE}"
+
+        records.append(
+            FieldAvailability(
+                field_name="store_analysis",
+                availability_status=status,
+                source_column=", ".join(source_columns) or None,
+                default_value=None,
+                user_confirmed=user_confirmed,
                 notes=notes,
                 provided_row_count=provided_row_count,
                 total_row_count=total_row_count,
@@ -891,6 +1066,25 @@ def _customer_mapping_issue(
             f"customer_id source {customer_id.source_column!r} is customer. "
             "Customer analysis was skipped."
         )
+    return None
+
+
+def _store_mapping_issue(
+    plan: StandardFieldMappingPlan,
+    source_entity_roles: Mapping[str, str] | None,
+) -> str | None:
+    selections = {item.standard_field: item for item in plan.selections}
+    for field in ("store_id", "store_name"):
+        selection = selections[field]
+        if selection.strategy != "source":
+            continue
+        role = _source_entity_role(selection.source_column, source_entity_roles)
+        if role in KNOWN_ENTITY_ROLES and role != "store":
+            return (
+                f"Store field mapping conflict: {field} source "
+                f"{selection.source_column!r} is classified as {role}, not store. "
+                "Store analysis was skipped."
+            )
     return None
 
 
@@ -941,16 +1135,20 @@ def _convert_selection(
         warnings.append(
             "discount_rate is explicitly set to 0 for every row; this is a business assumption."
         )
-    elif selection.strategy == "not_provided":
+    elif selection.strategy in {"not_provided", "not_applicable"}:
         dtype = "boolean" if field == "returned" else "string"
         converted = pd.Series(pd.NA, index=frame.index, dtype=dtype)
         recommendation = _strategy_recommendation(selection)
         source_non_null_count = 0
         conversion_failure_count = 0
-        source_or_strategy = "Data not provided"
-        if field == "returned":
+        source_or_strategy = (
+            "Data not provided"
+            if selection.strategy == "not_provided"
+            else "Not applicable"
+        )
+        if field == "returned" and selection.strategy == "not_provided":
             warnings.append(
-                "returned data was not provided and remains unknown; missing values are not false."
+                RETURN_NOT_PROVIDED_MESSAGE
             )
         elif field == "customer_id":
             warnings.append(
@@ -1004,8 +1202,8 @@ def _convert_selection(
     null_rate = null_count / len(converted) if len(converted) else 0.0
 
     status = "passed"
-    if selection.strategy == "not_provided":
-        status = "not_provided"
+    if selection.strategy in {"not_provided", "not_applicable"}:
+        status = selection.strategy
     elif selection.strategy.startswith("temporary_"):
         status = "warning"
     elif selection.strategy == "default_zero":
@@ -1110,16 +1308,20 @@ def generate_unified_orders(
     customer_mapping_issue = _customer_mapping_issue(
         plan, source_entity_roles
     )
+    store_mapping_issue = _store_mapping_issue(plan, source_entity_roles)
     availability = _field_availability(
         plan,
         output,
         customer_mapping_issue,
+        store_mapping_issue,
     )
     if customer_mapping_issue:
         warnings.append(customer_mapping_issue)
+    if store_mapping_issue:
+        warnings.append(store_mapping_issue)
 
     missing_required = [
-        field for field in REQUIRED_STANDARD_FIELDS if field not in output.columns
+        field for field in PIPELINE_REQUIRED_OUTPUT_FIELDS if field not in output.columns
     ]
     if missing_required:
         errors.append(

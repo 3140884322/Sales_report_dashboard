@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import csv
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -71,7 +72,20 @@ def _read_csv(data: bytes, source_name: str) -> tuple[pd.DataFrame, str]:
     last_error = None
     for encoding in ENCODING_CANDIDATES:
         try:
-            return pd.read_csv(BytesIO(data), encoding=encoding), encoding
+            frame = pd.read_csv(BytesIO(data), encoding=encoding)
+            if len(frame.columns) == 1:
+                sample = data[:8192].decode(encoding)
+                try:
+                    delimiter = csv.Sniffer().sniff(
+                        sample, delimiters=",;|\t"
+                    ).delimiter
+                except csv.Error:
+                    delimiter = ","
+                if delimiter != ",":
+                    frame = pd.read_csv(
+                        BytesIO(data), encoding=encoding, sep=delimiter
+                    )
+            return frame, encoding
         except UnicodeDecodeError as error:
             last_error = error
 

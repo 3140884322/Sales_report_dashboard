@@ -10,15 +10,22 @@ import pandas as pd
 
 from analysis import make_report_status_table, run_pipeline
 from generic_report_models import GenericPreflightIssue, GenericReportPreflight
-from standard_field_mapping import REQUIRED_STANDARD_FIELDS
+from generic_store_analysis import (
+    StoreAnalysisResult,
+    build_store_analysis,
+    valid_store_summary,
+)
+from standard_field_mapping import (
+    REQUIRED_STANDARD_FIELDS,
+    RETURN_NOT_APPLICABLE_MESSAGE,
+    RETURN_NOT_PROVIDED_MESSAGE,
+    STORE_NOT_PROVIDED_MESSAGE,
+)
 from standard_field_models import FieldAvailability, StandardMappingResult
 
 
 INVALID_DATE_ACTION_BLOCK = "block"
 INVALID_DATE_ACTION_EXCLUDE_MONTHLY = "exclude_from_monthly"
-RETURN_NOT_PROVIDED_MESSAGE = (
-    "Return data was not provided. Return analysis was skipped."
-)
 CUSTOMER_NOT_PROVIDED_MESSAGE = (
     "Customer data was not provided. Customer analysis was skipped."
 )
@@ -83,6 +90,51 @@ def get_field_availability_notes(report_tables, field_name: str) -> str:
 
 def return_analysis_available(report_tables) -> bool:
     return get_field_availability_status(report_tables, "returned") == "provided"
+
+
+def return_analysis_unavailable_message(report_tables) -> str:
+    status = get_field_availability_status(report_tables, "returned")
+    if status == "not_applicable":
+        return RETURN_NOT_APPLICABLE_MESSAGE
+    return RETURN_NOT_PROVIDED_MESSAGE
+
+
+def build_report_coverage_table(availability_table: pd.DataFrame) -> pd.DataFrame:
+    """Build a compact report-coverage record from confirmed field availability."""
+    report_tables = {"field_availability": availability_table}
+    returned_status = get_field_availability_status(report_tables, "returned")
+    if returned_status == "provided":
+        coverage_status = "available"
+        notes = "Return data was provided."
+    elif returned_status == "not_applicable":
+        coverage_status = "not_applicable"
+        notes = RETURN_NOT_APPLICABLE_MESSAGE
+    else:
+        coverage_status = "not_available"
+        notes = RETURN_NOT_PROVIDED_MESSAGE
+    rows = [
+        {
+            "analysis": "Return analysis",
+            "coverage_status": coverage_status,
+            "notes": notes,
+        }
+    ]
+    store_status = get_field_availability_status(
+        report_tables, "store_analysis"
+    )
+    store_notes = get_field_availability_notes(report_tables, "store_analysis")
+    rows.append(
+        {
+            "analysis": "Store analysis",
+            "coverage_status": (
+                "available"
+                if store_status in {"provided", "partially_provided"}
+                else "not_available"
+            ),
+            "notes": store_notes or STORE_NOT_PROVIDED_MESSAGE,
+        }
+    )
+    return pd.DataFrame(rows)
 
 
 def customer_analysis_available(report_tables) -> bool:
@@ -288,7 +340,7 @@ def run_generic_report_preflight(
             )
 
     returned_status = _availability_status(mapping_result, "returned")
-    if returned_status == "not_provided":
+    if returned_status in {"not_provided", "not_applicable"}:
         if frame["returned"].notna().any():
             issues.append(
                 GenericPreflightIssue(
@@ -296,10 +348,10 @@ def run_generic_report_preflight(
                     "returned",
                     "critical",
                     int(frame["returned"].notna().sum()),
-                    "returned is marked not_provided but contains non-null values.",
+                    f"returned is marked {returned_status} but contains non-null values.",
                 )
             )
-        else:
+        elif returned_status == "not_provided":
             warnings.append(RETURN_NOT_PROVIDED_MESSAGE)
     elif frame["returned"].isna().any():
         warnings.append(
@@ -512,6 +564,42 @@ def build_data_preparation_summary(
     return pd.DataFrame(rows, columns=["section", "item", "value", "notes"])
 
 
+def _with_final_store_availability(
+    availability_table: pd.DataFrame,
+    store_result: StoreAnalysisResult,
+) -> pd.DataFrame:
+    updated = availability_table.copy()
+    matches = updated["field_name"] == "store_analysis"
+    values = {
+        "availability_status": store_result.availability_status,
+        "notes": store_result.notes,
+        "provided_row_count": store_result.provided_row_count,
+        "total_row_count": store_result.total_row_count,
+    }
+    if matches.any():
+        for column, value in values.items():
+            updated.loc[matches, column] = value
+        return updated
+
+    return pd.concat(
+        [
+            updated,
+            pd.DataFrame(
+                [
+                    {
+                        "field_name": "store_analysis",
+                        **values,
+                        "source_column": None,
+                        "default_value": None,
+                        "user_confirmed": True,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+
+
 def _adapt_generic_report_tables(
     report_tables,
     availability_table,
@@ -519,10 +607,51 @@ def _adapt_generic_report_tables(
     excluded_rows_detail,
 ):
     tables = dict(report_tables)
+    store_result = build_store_analysis(
+        tables["enriched_orders"], availability_table
+    )
+    availability_table = _with_final_store_availability(
+        availability_table, store_result
+    )
     tables["field_availability"] = availability_table
+    if store_result.availability_status in {"provided", "partially_provided"}:
+        tables["store_summary"] = store_result.summary
+    tables["report_coverage"] = build_report_coverage_table(availability_table)
     tables["data_preparation_summary"] = preparation_summary
     tables["excluded_rows_detail"] = excluded_rows_detail
     adapted = False
+
+    if "store_summary" in tables:
+        enriched = tables["enriched_orders"]
+        store_summary = tables["store_summary"]
+        checks = []
+        for check_name, expected, actual in (
+            (
+                "store_summary_revenue_equals_enriched_orders_final_revenue",
+                float(enriched["final_revenue"].sum()),
+                float(store_summary["revenue"].sum()),
+            ),
+            (
+                "store_summary_units_equals_enriched_orders_units",
+                float(enriched["quantity"].sum()),
+                float(store_summary["units"].sum()),
+            ),
+        ):
+            difference = actual - expected
+            checks.append(
+                {
+                    "check_name": check_name,
+                    "expected_value": expected,
+                    "actual_value": actual,
+                    "difference": difference,
+                    "status": "passed" if abs(difference) <= 0.01 else "failed",
+                }
+            )
+        tables["validation_report"] = pd.concat(
+            [tables["validation_report"], pd.DataFrame(checks)],
+            ignore_index=True,
+        )
+        adapted = True
 
     if not customer_analysis_available(tables):
         tables["customer_summary"] = tables["customer_summary"].iloc[0:0].copy()
@@ -542,7 +671,8 @@ def _adapt_generic_report_tables(
         tables["validation_report"] = validation
         adapted = True
 
-    if get_field_availability_status(tables, "returned") == "not_provided":
+    returned_status = get_field_availability_status(tables, "returned")
+    if returned_status in {"not_provided", "not_applicable"}:
         quality = tables["post_conversion_data_quality"].copy()
         invalid_mask = quality["check_name"] == "invalid_returned_count"
         quality.loc[invalid_mask, "issue_count"] = 0
@@ -553,9 +683,17 @@ def _adapt_generic_report_tables(
                 pd.DataFrame(
                     [
                         {
-                            "check_name": "return_analysis_not_available",
+                            "check_name": (
+                                "return_analysis_not_applicable"
+                                if returned_status == "not_applicable"
+                                else "return_analysis_not_available"
+                            ),
                             "issue_count": 0,
-                            "status": "not_available",
+                            "status": (
+                                "not_applicable"
+                                if returned_status == "not_applicable"
+                                else "not_available"
+                            ),
                         }
                     ]
                 ),
@@ -572,9 +710,12 @@ def _adapt_generic_report_tables(
         ):
             table = tables[table_name].copy()
             if "return_rate" in table.columns:
-                table["return_rate"] = pd.Series(
-                    pd.NA, index=table.index, dtype="Float64"
-                )
+                if returned_status == "not_applicable":
+                    table = table.drop(columns=["return_rate"])
+                else:
+                    table["return_rate"] = pd.Series(
+                        pd.NA, index=table.index, dtype="Float64"
+                    )
             tables[table_name] = table
 
         anomalies = tables["anomalies"]
@@ -612,6 +753,7 @@ def _adapt_generic_report_tables(
 def _generic_markdown_sections(
     preparation_summary: pd.DataFrame,
     availability_table: pd.DataFrame,
+    report_tables,
 ) -> str:
     lines = ["## Data Preparation Summary"]
     for _, row in preparation_summary.iterrows():
@@ -631,7 +773,7 @@ def _generic_markdown_sections(
     returned_status = get_field_availability_status(
         {"field_availability": availability_table}, "returned"
     )
-    lines.extend(["", "## Return Analysis"])
+    lines.extend(["", "## Report Coverage"])
     if returned_status == "not_provided":
         lines.extend(
             [
@@ -640,6 +782,8 @@ def _generic_markdown_sections(
                 "- Return adjustments were not applied because return status was unavailable.",
             ]
         )
+    elif returned_status == "not_applicable":
+        lines.append(f"- {RETURN_NOT_APPLICABLE_MESSAGE}")
     else:
         lines.append("- Return Analysis: Available.")
 
@@ -673,6 +817,30 @@ def _generic_markdown_sections(
         )
     else:
         lines.append("- Customer Analysis: Available.")
+
+    store_status = get_field_availability_status(
+        {"field_availability": availability_table}, "store_analysis"
+    )
+    store_notes = get_field_availability_notes(
+        {"field_availability": availability_table}, "store_analysis"
+    )
+    lines.extend(["", "## Store Analysis"])
+    if store_status in {"provided", "partially_provided"}:
+        lines.append(f"- Store Analysis: {store_status.replace('_', ' ').title()}.")
+        lines.append(f"- {store_notes}")
+        valid_stores = valid_store_summary(report_tables.get("store_summary"))
+        if not valid_stores.empty:
+            top = valid_stores.iloc[0]
+            lines.append(
+                f"- Top Store: {top['store_name']} with ${top['revenue']:,.2f} "
+                f"in revenue ({top['revenue_share']:.1%} of total revenue)."
+            )
+    elif store_status == "mapping_conflict":
+        lines.extend(["- Store Analysis: Not Available.", f"- {store_notes}"])
+    else:
+        lines.extend(
+            ["- Store Analysis: Not Available.", f"- {STORE_NOT_PROVIDED_MESSAGE}"]
+        )
     return "\n".join(lines)
 
 
@@ -695,11 +863,15 @@ def _append_transparency_sheets(excel_path, report_tables):
             and "customer_summary" in writer.book.sheetnames
         ):
             writer.book.remove(writer.book["customer_summary"])
-        for table_name, sheet_name in (
+        sheet_pairs = [
             ("data_preparation_summary", "data_preparation_summary"),
             ("field_availability", "field_availability"),
+            ("report_coverage", "report_coverage"),
             ("excluded_rows_detail", "excluded_rows_detail"),
-        ):
+        ]
+        if "store_summary" in report_tables:
+            sheet_pairs.append(("store_summary", "store_summary"))
+        for table_name, sheet_name in sheet_pairs:
             report_tables[table_name].to_excel(
                 writer, sheet_name=sheet_name, index=False
             )
@@ -808,8 +980,11 @@ def generate_generic_report(
         )
 
         update(75, "4/5 Generating Excel")
+        availability = report_tables["field_availability"]
         _append_transparency_sheets(excel_output, report_tables)
-        generic_sections = _generic_markdown_sections(preparation, availability)
+        generic_sections = _generic_markdown_sections(
+            preparation, availability, report_tables
+        )
         summary_text = _insert_generic_markdown(
             summary_output.read_text(encoding="utf-8"), generic_sections
         )

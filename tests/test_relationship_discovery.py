@@ -80,6 +80,19 @@ class GenericTableReaderTests(unittest.TestCase):
         self.assertEqual([len(table.frame) for table in tables], [2, 2])
         self.assertEqual(uploaded.tell(), 0)
 
+    def test_csv_reader_sniffs_pipe_delimiter_when_default_is_one_column(self):
+        uploaded = named_bytes(
+            b"transaction_id|store_id|store_location\n1|5|Astoria\n",
+            "coffee.csv",
+        )
+
+        tables = read_tabular_sources(uploaded)
+
+        self.assertEqual(
+            list(tables[0].frame.columns),
+            ["transaction_id", "store_id", "store_location"],
+        )
+
     def test_xlsx_reader_loads_each_sheet_from_path_and_file_like(self):
         workbook_bytes = make_workbook_bytes()
         uploaded = named_bytes(workbook_bytes, "retail.xlsx")

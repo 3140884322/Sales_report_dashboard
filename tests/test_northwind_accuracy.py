@@ -18,6 +18,7 @@ from confirmed_relationship_plan import (
 from generic_report_generation import (
     customer_analysis_available,
     generate_generic_report,
+    get_field_availability_status,
     run_generic_report_preflight,
 )
 from relationship_discovery import (
@@ -208,6 +209,14 @@ class NorthwindGenericAccuracyTests(unittest.TestCase):
             recommendations["customer_name"].recommended_source,
             {"Shippers.CompanyName", "Suppliers.CompanyName"},
         )
+
+    def test_northwind_does_not_infer_a_store_from_other_entities(self):
+        report_tables = self.flow["report"]["report_tables"]
+        self.assertEqual(
+            get_field_availability_status(report_tables, "store_analysis"),
+            "not_provided",
+        )
+        self.assertNotIn("store_summary", report_tables)
 
     def test_safe_merge_and_unified_orders_preserve_line_grain(self):
         merge_result = self.flow["merge"]

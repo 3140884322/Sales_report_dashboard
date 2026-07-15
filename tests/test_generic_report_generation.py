@@ -25,10 +25,13 @@ from generic_report_generation import (
     CUSTOMER_NOT_PROVIDED_MESSAGE,
     CUSTOMER_PARTIALLY_PROVIDED_MESSAGE,
     INVALID_DATE_ACTION_EXCLUDE_MONTHLY,
+    RETURN_NOT_APPLICABLE_MESSAGE,
+    RETURN_NOT_PROVIDED_MESSAGE,
     build_data_preparation_summary,
     customer_analysis_available,
     customer_analysis_unavailable_message,
     generate_generic_report,
+    get_field_availability_status,
     return_analysis_available,
     run_generic_report_preflight,
 )
@@ -230,6 +233,7 @@ class SmallGenericReportTests(unittest.TestCase):
     def test_returned_not_provided_is_not_a_zero_percent_claim(self):
         tables = self.report_without_expenses["report_tables"]
 
+        self.assertEqual(self.report_without_expenses["status"], "ready")
         self.assertFalse(return_analysis_available(tables))
         self.assertTrue(tables["monthly_summary"]["return_rate"].isna().all())
         self.assertFalse(
@@ -241,6 +245,9 @@ class SmallGenericReportTests(unittest.TestCase):
         ].iloc[0]
         self.assertEqual(returned_check["status"], "not_applicable")
         self.assertEqual(int(returned_check["issue_count"]), 0)
+        coverage = tables["report_coverage"].iloc[0]
+        self.assertEqual(coverage["coverage_status"], "not_available")
+        self.assertEqual(coverage["notes"], RETURN_NOT_PROVIDED_MESSAGE)
 
     def test_return_chart_availability_gate_is_false(self):
         self.assertFalse(
@@ -298,6 +305,126 @@ class SmallGenericReportTests(unittest.TestCase):
         self.assertFalse(unchanged)
         self.assertTrue(changed)
         self.assertNotIn("generic_report_result", state)
+
+
+class ReturnNotApplicableReportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = base_source_frame()
+        selections = list(
+            selections_from_recommendations(
+                recommend_standard_field_mappings(source), confirmed=True
+            )
+        )
+        selections = [
+            replace(
+                selection,
+                strategy="not_applicable",
+                source_column=None,
+                confirmed=True,
+            )
+            if selection.standard_field == "returned"
+            else selection
+            for selection in selections
+        ]
+        cls.mapping = generate_unified_orders(source, selections)
+        cls.preflight = run_generic_report_preflight(cls.mapping)
+        cls.report = generate_generic_report(
+            mapping_result=cls.mapping,
+            preflight=cls.preflight,
+            discovery_result=None,
+            plan=empty_plan(),
+            decisions={},
+        )
+
+    def test_not_applicable_is_ready_and_has_no_missing_return_warning(self):
+        availability = self.report["field_availability"]
+        returned = availability.loc[
+            availability["field_name"] == "returned"
+        ].iloc[0]
+
+        self.assertTrue(self.mapping.success, self.mapping.errors)
+        self.assertTrue(self.preflight.can_generate)
+        self.assertEqual(self.report["status"], "ready")
+        self.assertEqual(returned["availability_status"], "not_applicable")
+        self.assertNotIn(RETURN_NOT_PROVIDED_MESSAGE, self.mapping.warnings)
+        self.assertNotIn(RETURN_NOT_PROVIDED_MESSAGE, self.preflight.warnings)
+
+    def test_not_applicable_skips_all_return_outputs_and_conclusions(self):
+        tables = self.report["report_tables"]
+
+        self.assertFalse(return_analysis_available(tables))
+        self.assertNotIn("return_rate", tables["monthly_summary"].columns)
+        self.assertFalse(
+            tables["anomalies"]["anomaly_type"]
+            .eq("return_rate_over_15_percent")
+            .any()
+        )
+        self.assertIn(RETURN_NOT_APPLICABLE_MESSAGE, self.report["summary_text"])
+        self.assertNotIn(RETURN_NOT_PROVIDED_MESSAGE, self.report["summary_text"])
+        self.assertNotIn("0.0% return", self.report["summary_text"])
+
+    def test_not_applicable_is_recorded_in_report_coverage_and_excel(self):
+        coverage = self.report["report_tables"]["report_coverage"].iloc[0]
+
+        self.assertEqual(coverage["coverage_status"], "not_applicable")
+        self.assertEqual(coverage["notes"], RETURN_NOT_APPLICABLE_MESSAGE)
+        workbook = load_workbook(BytesIO(self.report["excel_bytes"]), read_only=True)
+        try:
+            self.assertIn("report_coverage", workbook.sheetnames)
+            worksheet = workbook["report_coverage"]
+            values = list(worksheet.values)
+            self.assertIn(RETURN_NOT_APPLICABLE_MESSAGE, values[1])
+        finally:
+            workbook.close()
+
+    def test_not_applicable_is_not_a_data_limitation_or_action_item(self):
+        import app as dashboard_app
+
+        limitations = dashboard_app.make_data_limitations_table(self.report)
+        action_items = dashboard_app.make_action_required_table(self.report)
+
+        self.assertFalse(
+            limitations["Limitation"].str.contains("Return data", case=False).any()
+        )
+        self.assertFalse(
+            action_items["Issue"].str.contains("return", case=False).any()
+        )
+
+
+class ReturnProvidedReportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = base_source_frame()
+        source["Returned"] = [True, False, False, False]
+        selections = selections_from_recommendations(
+            recommend_standard_field_mappings(source), confirmed=True
+        )
+        cls.mapping = generate_unified_orders(source, selections)
+        cls.preflight = run_generic_report_preflight(cls.mapping)
+        cls.report = generate_generic_report(
+            mapping_result=cls.mapping,
+            preflight=cls.preflight,
+            discovery_result=None,
+            plan=empty_plan(),
+            decisions={},
+        )
+
+    def test_returned_source_column_keeps_return_analysis_available(self):
+        availability = self.report["field_availability"]
+        returned = availability.loc[
+            availability["field_name"] == "returned"
+        ].iloc[0]
+        monthly = self.report["report_tables"]["monthly_summary"]
+
+        self.assertTrue(self.mapping.success, self.mapping.errors)
+        self.assertTrue(self.preflight.can_generate)
+        self.assertEqual(returned["availability_status"], "provided")
+        self.assertEqual(returned["source_column"], "Returned")
+        self.assertTrue(return_analysis_available(self.report["report_tables"]))
+        self.assertIn("return_rate", monthly.columns)
+        self.assertTrue(monthly["return_rate"].notna().all())
+        self.assertIn("Return Analysis: Available", self.report["summary_text"])
 
 
 class PizzaGenericReportTests(unittest.TestCase):
@@ -536,6 +663,14 @@ class PizzaFourCsvEndToEndTests(unittest.TestCase):
         ].iloc[0]
         self.assertEqual(customer["availability_status"], "not_provided")
 
+    def test_pizza_does_not_create_a_store_module(self):
+        tables = self.report["report_tables"]
+        self.assertEqual(
+            get_field_availability_status(tables, "store_analysis"),
+            "not_provided",
+        )
+        self.assertNotIn("store_summary", tables)
+
     def test_customer_conclusions_are_absent_from_all_report_outputs(self):
         tables = self.report["report_tables"]
         self.assertFalse(customer_analysis_available(tables))
@@ -745,6 +880,21 @@ class MavenGenericEndToEndTests(unittest.TestCase):
         finally:
             workbook.close()
 
+    def test_maven_store_key_enables_id_only_store_analysis(self):
+        tables = self.report["report_tables"]
+        self.assertEqual(
+            get_field_availability_status(tables, "store_analysis"),
+            "provided",
+        )
+        self.assertEqual(len(tables["store_summary"]), 58)
+        self.assertTrue(
+            tables["store_summary"]["store_name"].str.startswith("Store ").all()
+        )
+        self.assertAlmostEqual(
+            tables["store_summary"]["revenue"].sum(),
+            tables["enriched_orders"]["final_revenue"].sum(),
+        )
+
     def test_maven_generic_excel_and_markdown_are_available(self):
         self.assertGreater(len(self.report["excel_bytes"]), 100_000)
         self.assertTrue(
@@ -827,16 +977,28 @@ class UnifiedSingleTableEndToEndTests(unittest.TestCase):
         )
 
     @classmethod
-    def run_source(cls, source):
+    def run_source(cls, source, *, returned_strategy=None):
         discovery = discover_relationships(read_tabular_sources(source))
         plan, merge_result = build_single_table_join_result(discovery)
         recommendations = recommend_standard_field_mappings(
             merge_result.merged_frame
         )
-        mapping = generate_unified_orders(
-            merge_result.merged_frame,
-            selections_from_recommendations(recommendations, confirmed=True),
+        selections = list(
+            selections_from_recommendations(recommendations, confirmed=True)
         )
+        if returned_strategy is not None:
+            selections = [
+                replace(
+                    selection,
+                    strategy=returned_strategy,
+                    source_column=None,
+                    confirmed=True,
+                )
+                if selection.standard_field == "returned"
+                else selection
+                for selection in selections
+            ]
+        mapping = generate_unified_orders(merge_result.merged_frame, selections)
         preflight = run_generic_report_preflight(
             mapping,
             original_fact_row_count=merge_result.fact_row_count,
@@ -856,7 +1018,9 @@ class UnifiedSingleTableEndToEndTests(unittest.TestCase):
         frame = cls.coffee_frame()
         csv_source = BytesIO(frame.to_csv(index=False).encode("utf-8"))
         csv_source.name = "coffee_shop.csv"
-        cls.csv_flow = cls.run_source(csv_source)
+        cls.csv_flow = cls.run_source(
+            csv_source, returned_strategy="not_applicable"
+        )
 
         workbook = BytesIO()
         with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
@@ -889,6 +1053,20 @@ class UnifiedSingleTableEndToEndTests(unittest.TestCase):
         self.assertTrue(report["report_tables"]["customer_summary"].empty)
         self.assertGreater(len(report["excel_bytes"]), 1_000)
         self.assertTrue(report["summary_text"].startswith("# Sales Reporting Summary"))
+
+    def test_coffee_marks_return_analysis_not_applicable(self):
+        mapping = self.csv_flow[3]
+        report = self.csv_flow[-1]
+        returned = next(
+            item
+            for item in mapping.field_availability
+            if item.field_name == "returned"
+        )
+
+        self.assertEqual(returned.availability_status, "not_applicable")
+        self.assertEqual(report["status"], "ready")
+        self.assertIn(RETURN_NOT_APPLICABLE_MESSAGE, report["summary_text"])
+        self.assertNotIn("return_rate", report["report_tables"]["monthly_summary"])
 
     def test_one_sheet_xlsx_generates_the_same_ready_report(self):
         discovery, plan, merge, mapping, preflight, report = self.xlsx_flow

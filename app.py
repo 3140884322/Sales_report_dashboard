@@ -6,7 +6,14 @@ from generic_relationship_ui import render_generic_relationship_mode
 from generic_report_generation import (
     customer_analysis_available,
     customer_analysis_unavailable_message,
+    get_field_availability_notes,
+    get_field_availability_status,
     return_analysis_available,
+    return_analysis_unavailable_message,
+)
+from generic_store_analysis import (
+    store_analysis_available,
+    valid_store_summary,
 )
 
 
@@ -47,6 +54,7 @@ def get_dashboard_metrics(report_tables):
     products = report_tables["top_products"]
     customers = report_tables["customer_summary"]
     anomalies = report_tables["anomalies"]
+    stores = valid_store_summary(report_tables.get("store_summary"))
 
     total_revenue = (
         enriched_orders["final_revenue"].sum()
@@ -69,6 +77,7 @@ def get_dashboard_metrics(report_tables):
     top_customer = (
         customers.iloc[0]["customer_name"] if not customers.empty else ""
     )
+    top_store = stores.iloc[0]["store_name"] if not stores.empty else ""
     anomaly_count = len(anomalies)
 
     return {
@@ -79,6 +88,7 @@ def get_dashboard_metrics(report_tables):
         "top_category": top_category,
         "top_product": top_product,
         "top_customer": top_customer,
+        "top_store": top_store,
         "anomaly_count": anomaly_count,
     }
 
@@ -97,19 +107,22 @@ def show_kpi_cards(report_tables):
     first_row[2].metric("Total Units", format_number(metrics["total_units"]))
     first_row[3].metric("Overall AOV", format_money(metrics["overall_aov"]))
 
-    customer_available = customer_analysis_available(report_tables)
-    second_row = st.columns(4 if customer_available else 3)
-    second_row[0].metric("Top Category", metrics["top_category"] or "N/A")
-    second_row[1].metric("Top Product", metrics["top_product"] or "N/A")
-    if customer_available:
-        second_row[2].metric("Top Customer", metrics["top_customer"] or "N/A")
-        second_row[3].metric(
-            "Anomaly Count", format_number(metrics["anomaly_count"])
-        )
-    else:
-        second_row[2].metric(
-            "Anomaly Count", format_number(metrics["anomaly_count"])
-        )
+    secondary_metrics = [
+        ("Top Category", metrics["top_category"] or "N/A"),
+        ("Top Product", metrics["top_product"] or "N/A"),
+    ]
+    if customer_analysis_available(report_tables):
+        secondary_metrics.append(("Top Customer", metrics["top_customer"] or "N/A"))
+    if store_analysis_available(report_tables):
+        secondary_metrics.append(("Top Store", metrics["top_store"] or "N/A"))
+    secondary_metrics.append(
+        ("Anomaly Count", format_number(metrics["anomaly_count"]))
+    )
+    for start in range(0, len(secondary_metrics), 4):
+        row_metrics = secondary_metrics[start : start + 4]
+        columns = st.columns(len(row_metrics))
+        for column, (label, value) in zip(columns, row_metrics):
+            column.metric(label, value)
 
 
 def clean_time_axis(table):
@@ -251,6 +264,34 @@ def show_top_customers_chart(report_tables):
     )
     fig.update_xaxes(tickprefix="$", separatethousands=True)
     fig.update_layout(xaxis_title="Revenue", yaxis_title="Customer")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def show_store_performance_chart(report_tables):
+    """Show revenue and operating context for each assigned store."""
+    stores = report_tables["store_summary"].sort_values(
+        "revenue", ascending=True
+    )
+    if stores.empty:
+        return
+    if get_field_availability_status(report_tables, "store_analysis") == "partially_provided":
+        st.info(get_field_availability_notes(report_tables, "store_analysis"))
+    fig = px.bar(
+        stores,
+        x="revenue",
+        y="store_name",
+        orientation="h",
+        title="Store Performance by Revenue",
+        hover_data={
+            "revenue": ":$,.2f",
+            "orders": ":,",
+            "units": ":,",
+            "aov": ":$,.2f",
+            "revenue_share": ":.1%",
+        },
+    )
+    fig.update_xaxes(tickprefix="$", separatethousands=True)
+    fig.update_layout(xaxis_title="Revenue", yaxis_title="Store")
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -410,10 +451,14 @@ def show_visual_dashboard(report_result):
         if return_analysis_available(report_tables):
             show_monthly_return_rate_chart(report_tables)
         else:
-            st.info("Return data was not provided. Return analysis was skipped.")
+            st.info(return_analysis_unavailable_message(report_tables))
 
     with third_right:
         show_anomalies_by_type_chart(report_tables)
+
+    if store_analysis_available(report_tables):
+        st.subheader("Store Analysis")
+        show_store_performance_chart(report_tables)
 
     if not report_result["expenses_uploaded"]:
         st.info("Expense file was not uploaded, so finance charts are skipped.")
@@ -550,7 +595,7 @@ def make_data_limitations_table(report_result):
                 "Impact": "Finance and cash-flow analysis was skipped.",
             }
         )
-    if not return_analysis_available(report_tables):
+    if get_field_availability_status(report_tables, "returned") == "not_provided":
         rows.append(
             {
                 "Limitation": "Return data was not provided",
@@ -623,6 +668,7 @@ def show_business_insights(report_tables):
     top_category = categories.iloc[0] if not categories.empty else None
     top_product = products.iloc[0] if not products.empty else None
     top_customer = customers.iloc[0] if not customers.empty else None
+    stores = valid_store_summary(report_tables.get("store_summary"))
 
     if strongest_month is not None:
         st.write(
@@ -660,6 +706,19 @@ def show_business_insights(report_tables):
             f"({format_money(top_customer['revenue'])})."
         )
 
+    if len(stores) >= 2:
+        top_store = stores.iloc[0]
+        lowest_store = stores.iloc[-1]
+        st.write(
+            f"- Top store: {top_store['store_name']} "
+            f"({format_money(top_store['revenue'])}, "
+            f"{top_store['revenue_share']:.1%} of total revenue)."
+        )
+        st.write(
+            f"- Lowest-revenue store: {lowest_store['store_name']} "
+            f"({format_money(lowest_store['revenue'])})."
+        )
+
     st.write(f"- Detected anomalies: {len(anomalies):,}.")
 
 
@@ -690,6 +749,8 @@ def show_detail_tables(report_result):
     show_table_expander("Monthly Summary", report_tables["monthly_summary"])
     show_table_expander("Category Summary", report_tables["category_summary"])
     show_table_expander("Top Products", report_tables["top_products"])
+    if store_analysis_available(report_tables):
+        show_table_expander("Store Summary", report_tables["store_summary"])
     if customer_analysis_available(report_tables):
         show_table_expander("Top Customers", report_tables["customer_summary"])
     show_table_expander(
@@ -711,6 +772,11 @@ def show_detail_tables(report_result):
         show_table_expander(
             "Field Availability",
             report_tables["field_availability"],
+        )
+    if "report_coverage" in report_tables:
+        show_table_expander(
+            "Report Coverage",
+            report_tables["report_coverage"],
         )
     if "excluded_rows_detail" in report_tables:
         show_table_expander(
@@ -765,6 +831,13 @@ def show_report_dashboard(report_result):
             hide_index=True,
             use_container_width=True,
         )
+        if "report_coverage" in report_result["report_tables"]:
+            st.subheader("Report Coverage")
+            st.dataframe(
+                report_result["report_tables"]["report_coverage"],
+                hide_index=True,
+                use_container_width=True,
+            )
         if report_result.get("excluded_row_count"):
             st.warning(
                 f"{report_result['excluded_row_count']:,} row(s) were explicitly "
@@ -775,8 +848,13 @@ def show_report_dashboard(report_result):
                 f"{report_result['monthly_analysis_excluded_row_count']:,} row(s) "
                 "with invalid dates were excluded from monthly analysis only."
             )
-        if not return_analysis_available(report_result["report_tables"]):
-            st.info("Return data was not provided. Return analysis was skipped.")
+        if (
+            get_field_availability_status(
+                report_result["report_tables"], "returned"
+            )
+            == "not_provided"
+        ):
+            st.info(return_analysis_unavailable_message(report_result["report_tables"]))
             st.caption(
                 "Return adjustments were not applied because return status was unavailable."
             )
